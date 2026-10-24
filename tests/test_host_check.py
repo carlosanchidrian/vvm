@@ -4,6 +4,8 @@ Todos los lectores del sistema se sustituyen con monkeypatch: aquí solo se
 prueba la decisión (estado, bloqueo y evidencia), no el anfitrión real.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from vvm import host_check
@@ -35,7 +37,6 @@ DEFAULTS = {
     "read_core_pattern": lambda: "core\n",
     "read_ksm_run": lambda: "0\n",
     "read_shmem_enabled": lambda: "always [madvise] never\n",
-    "shm_free_bytes": lambda: 1024**3,
     "list_shm_entries": lambda: ["bus"],
 }
 
@@ -211,16 +212,32 @@ def test_p7_cmd_without_dump_guest_core_fails(readers):
     assert "dump-guest-core=off" in p7.evidence
 
 
-def test_p8_not_enough_space_fails_blocking(readers):
-    readers.setattr(host_check, "shm_free_bytes", lambda: 256 * 1024 * 1024 - 1)
+def test_p8_no_exige_espacio_y_falla_si_no_puede_listar(readers):
+    # El disco del guest va en memfd: con 1 MB libre en /dev/shm debe dar OK.
+    readers.setattr(
+        host_check.os,
+        "statvfs",
+        lambda path: SimpleNamespace(f_bavail=1, f_frsize=1024 * 1024),
+    )
+    readers.setattr(host_check, "list_shm_entries", lambda: ["bus"])
 
     results = run_check(readers)
     p8 = result_of(results, "P8")
 
+    assert p8.status == "OK"
+    assert p8.blocking is True
+    assert "sin restos vvm-*" in p8.evidence
+    assert has_blocking(results) is False
+
+    def denied():
+        raise OSError("permiso denegado")
+
+    readers.setattr(host_check, "list_shm_entries", denied)
+    p8 = result_of(run_check(readers), "P8")
+
     assert p8.status == "FAIL"
     assert p8.blocking is True
-    assert "necesario=268435456 B" in p8.evidence
-    assert has_blocking(results) is True
+    assert "permiso denegado" in p8.evidence
 
 
 def test_p8_leftovers_only_warn(readers):
@@ -235,7 +252,7 @@ def test_p8_leftovers_only_warn(readers):
     assert has_blocking(results) is False
 
 
-def test_p8_enough_space_without_leftovers_is_ok(readers):
+def test_p8_without_leftovers_is_ok(readers):
     readers.setattr(host_check, "list_shm_entries", lambda: ["bus"])
 
     p8 = result_of(run_check(readers), "P8")

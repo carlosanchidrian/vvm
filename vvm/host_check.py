@@ -101,12 +101,6 @@ def kvm_accessible() -> bool:
         return False
 
 
-def shm_free_bytes() -> int:
-    """Bytes libres para usuarios no privilegiados en `/dev/shm`."""
-    stats = os.statvfs(SHM_DIR)
-    return stats.f_bavail * stats.f_frsize
-
-
 def list_shm_entries() -> list[str]:
     """Nombres de las entradas de `/dev/shm`. Solo se listan: no se borra nada."""
     return sorted(os.listdir(SHM_DIR))
@@ -151,7 +145,7 @@ _P8 = _Spec(
     "P8",
     "/dev/shm",
     True,
-    f"Libera {SHM_DIR}: cierra procesos que lo usen y elimina los restos vvm-* (vvm no los borra).",
+    f"Elimina manualmente los restos vvm-* de {SHM_DIR} (vvm no los borra).",
 )
 _P9 = _Spec(
     "P9",
@@ -276,19 +270,15 @@ def _check_p7(cmd: Sequence[str]) -> CheckResult:
     return _result(_P7, "FAIL", "sin dump-guest-core=off en la línea: " + " ".join(cmd))
 
 
-def _check_p8(disk_mb: int) -> CheckResult:
-    needed = disk_mb * 1024 * 1024
-    free = shm_free_bytes()
-    evidence = f"{SHM_DIR} libre={free} B; necesario={needed} B ({disk_mb} MB)"
-    if free < needed:
-        return _result(_P8, "FAIL", evidence)
+def _check_p8() -> CheckResult:
+    """P8 solo busca restos: el disco del guest vive en un `memfd`, no aquí."""
     try:
         leftovers = [name for name in list_shm_entries() if name.startswith("vvm-")]
     except OSError as exc:
-        return _result(_P8, "WARN", f"{evidence}; no se pudo listar {SHM_DIR}: {exc}")
+        return _result(_P8, "FAIL", f"no se pudo listar {SHM_DIR}: {exc}")
     if leftovers:
-        return _result(_P8, "WARN", f"{evidence}; restos vvm-*: {', '.join(leftovers)}")
-    return _result(_P8, "OK", f"{evidence}; sin restos vvm-*")
+        return _result(_P8, "WARN", f"restos vvm-*: {', '.join(leftovers)}")
+    return _result(_P8, "OK", f"sin restos vvm-* en {SHM_DIR}")
 
 
 def _check_p9(cmd: Sequence[str]) -> CheckResult:
@@ -327,7 +317,7 @@ def check_host(mem_mb: int, disk_mb: int, cmd: Sequence[str]) -> list[CheckResul
         (_P5, _check_p5),
         (_P6, _check_p6),
         (_P7, lambda: _check_p7(cmd)),
-        (_P8, lambda: _check_p8(disk_mb)),
+        (_P8, _check_p8),
         (_P9, lambda: _check_p9(cmd)),
         (_P10, _check_p10),
     ]
