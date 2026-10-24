@@ -12,6 +12,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+# Marcador que identifica el backend de memoria de una sesión VVM en `cmdline`.
+SESSION_MARKER = "memory-backend-memfd,id=mem"
+
 
 @dataclass(frozen=True)
 class VmConfig:

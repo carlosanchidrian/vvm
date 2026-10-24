@@ -16,11 +16,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from vvm.vm import SESSION_MARKER
+
 MEMINFO_PATH = Path("/proc/meminfo")
 SHM_PATH = Path("/dev/shm")
 PROC_PATH = Path("/proc")
 
-_SESSION_MARKER = b"memory-backend-memfd,id=mem"
+_QEMU_PREFIX = "qemu-system-"
+_SESSION_MARKER_BYTES = SESSION_MARKER.encode()
 
 
 @dataclass(frozen=True)
@@ -80,15 +83,20 @@ def live_qemu_pids(proc_dir: Path = PROC_PATH) -> tuple[str, ...]:
 
 
 def _is_session_qemu(proc_pid: Path) -> bool:
-    """True si el `cmdline` del proceso contiene el marcador de esta sesión.
+    """True si es un `qemu-system-*` con el marcador de esta sesión en `cmdline`.
 
-    Sin `cmdline` legible no se puede atribuir la sesión, así que no cuenta.
+    Hacen falta las dos condiciones: el marcador aparece también en el `argv`
+    del propio CLI o de un shell, y esos procesos no son una VM. Sin `cmdline`
+    legible no se puede atribuir la sesión, así que no cuenta.
     """
     try:
         raw = (proc_pid / "cmdline").read_bytes()
     except OSError:
         return False
-    return _SESSION_MARKER in raw
+    argv0 = raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+    if not Path(argv0).name.startswith(_QEMU_PREFIX):
+        return False
+    return _SESSION_MARKER_BYTES in raw
 
 
 def _pid_sort_key(pid: str) -> tuple[int, int | str]:

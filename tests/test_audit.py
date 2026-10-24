@@ -104,16 +104,32 @@ def test_qemu_vivo_al_cierre_es_hallazgo():
     assert _last_line(report) == "HALLAZGOS: proceso QEMU vivo al cierre: pid 4242"
 
 
-def test_live_qemu_pids_solo_la_sesion(tmp_path: Path):
+def test_live_qemu_pids_detecta_qemu_con_marcador(tmp_path: Path):
     _fake_proc(
         tmp_path,
         "101",
         b"qemu-system-x86_64\0-object\0memory-backend-memfd,id=mem,size=512M,share=off\0",
     )
+
+    assert audit.live_qemu_pids(tmp_path) == ("101",)
+
+
+def test_live_qemu_pids_ignora_python_con_marcador(tmp_path: Path):
+    # El propio CLI o un `python -c` pueden llevar el marcador en argv.
+    _fake_proc(
+        tmp_path,
+        "300",
+        b"/usr/bin/python3\0-c\0import os; os.execv('qemu', ['memory-backend-memfd,id=mem'])\0",
+    )
+
+    assert audit.live_qemu_pids(tmp_path) == ()
+
+
+def test_live_qemu_pids_ignora_qemu_ajeno_y_cmdline_ilegible(tmp_path: Path):
     _fake_proc(tmp_path, "202", b"qemu-system-x86_64\0-m\01024M\0")
     _fake_proc(tmp_path, "303", None)
 
-    assert audit.live_qemu_pids(tmp_path) == ("101",)
+    assert audit.live_qemu_pids(tmp_path) == ()
 
 
 def test_sin_qemu_de_la_sesion_el_veredicto_es_limpio(tmp_path: Path):
