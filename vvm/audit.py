@@ -20,7 +20,7 @@ MEMINFO_PATH = Path("/proc/meminfo")
 SHM_PATH = Path("/dev/shm")
 PROC_PATH = Path("/proc")
 
-_QEMU_PREFIX = "qemu-system-"
+_SESSION_MARKER = b"memory-backend-memfd,id=mem"
 
 
 @dataclass(frozen=True)
@@ -65,35 +65,30 @@ def list_shm_entries(shm_dir: Path = SHM_PATH) -> tuple[str, ...]:
 
 
 def live_qemu_pids(proc_dir: Path = PROC_PATH) -> tuple[str, ...]:
-    """PIDs vivos de procesos QEMU leídos de `/proc/<pid>/cmdline` o `comm`."""
+    """PIDs de procesos QEMU de esta sesión (cmdline con el backend memfd)."""
     pids: list[str] = []
     try:
         with os.scandir(proc_dir) as entries:
             for entry in entries:
                 if not entry.name.isdigit():
                     continue
-                if _is_qemu_process(Path(entry.path)):
+                if _is_session_qemu(Path(entry.path)):
                     pids.append(entry.name)
     except OSError as exc:
         raise RuntimeError(f"No se pudo listar {proc_dir}: {exc}") from exc
     return tuple(sorted(pids, key=_pid_sort_key))
 
 
-def _is_qemu_process(proc_pid: Path) -> bool:
-    """True si el proceso parece un binario `qemu-system-*`."""
+def _is_session_qemu(proc_pid: Path) -> bool:
+    """True si el `cmdline` del proceso contiene el marcador de esta sesión.
+
+    Sin `cmdline` legible no se puede atribuir la sesión, así que no cuenta.
+    """
     try:
         raw = (proc_pid / "cmdline").read_bytes()
     except OSError:
         return False
-    if raw:
-        argv0 = raw.split(b"\0", 1)[0].decode("utf-8", "replace")
-        return Path(argv0).name.startswith(_QEMU_PREFIX)
-    # Procesos sin cmdline (kernel threads, zombis): queda `comm`, truncado a 15 letras.
-    try:
-        comm = (proc_pid / "comm").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    return comm.strip().startswith(_QEMU_PREFIX)
+    return _SESSION_MARKER in raw
 
 
 def _pid_sort_key(pid: str) -> tuple[int, int | str]:
@@ -142,7 +137,7 @@ def build_report(
         f"   Después: {_format_entries(after.shm_entries)}",
         "   Nuevas:  " + (", ".join(new_entries) if new_entries else "ninguna"),
         "",
-        "2. Procesos qemu-system-x86_64 vivos",
+        "2. Procesos QEMU de esta sesión vivos al cierre",
         f"   Antes:   {_format_entries(before.qemu_pids)}",
         f"   Después: {_format_entries(after.qemu_pids)}",
         "",

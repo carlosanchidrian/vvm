@@ -35,6 +35,14 @@ def _last_line(report: str) -> str:
     return report.rstrip("\n").splitlines()[-1]
 
 
+def _fake_proc(tmp_path: Path, pid: str, cmdline: bytes | None) -> None:
+    """Crea un `/proc/<pid>` de mentira con el cmdline indicado (None = ilegible)."""
+    proc_pid = tmp_path / pid
+    proc_pid.mkdir()
+    if cmdline is not None:
+        (proc_pid / "cmdline").write_bytes(cmdline)
+
+
 def test_nueva_entrada_en_shm_es_hallazgo():
     before = _snapshot(shm_entries=("resto-viejo",))
     after = _snapshot(shm_entries=("resto-viejo", "vvm-nueva"), taken_at="2026-10-24T10:05:00Z")
@@ -94,6 +102,31 @@ def test_qemu_vivo_al_cierre_es_hallazgo():
     report = audit.build_report(before, after)
 
     assert _last_line(report) == "HALLAZGOS: proceso QEMU vivo al cierre: pid 4242"
+
+
+def test_live_qemu_pids_solo_la_sesion(tmp_path: Path):
+    _fake_proc(
+        tmp_path,
+        "101",
+        b"qemu-system-x86_64\0-object\0memory-backend-memfd,id=mem,size=512M,share=off\0",
+    )
+    _fake_proc(tmp_path, "202", b"qemu-system-x86_64\0-m\01024M\0")
+    _fake_proc(tmp_path, "303", None)
+
+    assert audit.live_qemu_pids(tmp_path) == ("101",)
+
+
+def test_sin_qemu_de_la_sesion_el_veredicto_es_limpio(tmp_path: Path):
+    _fake_proc(tmp_path, "202", b"qemu-system-x86_64\0-m\01024M\0")
+
+    vivos = audit.live_qemu_pids(tmp_path)
+    report = audit.build_report(
+        _snapshot(),
+        _snapshot(qemu_pids=vivos, taken_at="2026-10-24T10:05:00Z"),
+    )
+
+    assert vivos == ()
+    assert _last_line(report) == CLEAN_VERDICT
 
 
 def test_deltas_de_memoria_con_signo():
