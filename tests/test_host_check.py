@@ -179,6 +179,26 @@ def test_p5_coredump_warns(readers):
     assert "coredump" in p5.evidence
 
 
+def test_p5_apport_warns(readers):
+    pattern = "|/usr/share/apport/apport -p%p %s %c %d %P\n"
+    readers.setattr(host_check, "read_core_pattern", lambda: pattern)
+
+    p5 = result_of(run_check(readers), "P5")
+
+    assert p5.status == "WARN"
+    assert p5.blocking is False
+    assert p5.evidence == pattern.strip()
+
+
+def test_p5_core_simple_no_avisa(readers):
+    readers.setattr(host_check, "read_core_pattern", lambda: "core\n")
+
+    p5 = result_of(run_check(readers), "P5")
+
+    assert p5.status == "OK"
+    assert p5.evidence == "core"
+
+
 def test_p6_ksm_enabled_warns(readers):
     readers.setattr(host_check, "read_ksm_run", lambda: "1\n")
 

@@ -251,7 +251,7 @@ def _check_p4() -> CheckResult:
 
 def _check_p5() -> CheckResult:
     raw = read_core_pattern().strip()
-    if "coredump" in raw:
+    if raw.startswith("|") or "coredump" in raw or "apport" in raw:
         return _result(_P5, "WARN", raw)
     return _result(_P5, "OK", raw)
 
