@@ -296,7 +296,7 @@ def _check_p10() -> CheckResult:
     raw = read_shmem_enabled().strip()
     value = _shmem_thp_value(raw) or "desconocido"
     evidence = f"shmem_enabled={raw or 'vacío'}; valor activo={value}"
-    status: Status = "WARN" if value == "always" else "OK"
+    status: Status = "WARN" if value in {"always", "force"} else "OK"
     return _result(_P10, status, evidence)
 
 

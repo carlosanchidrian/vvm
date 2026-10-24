@@ -298,6 +298,20 @@ def test_p10_always_warns(readers):
     assert "always" in p10.evidence
 
 
+def test_p10_force_warns(readers):
+    readers.setattr(
+        host_check,
+        "read_shmem_enabled",
+        lambda: "[force] always within_size advise never deny\n",
+    )
+
+    p10 = result_of(run_check(readers), "P10")
+
+    assert p10.status == "WARN"
+    assert p10.blocking is False
+    assert "force" in p10.evidence
+
+
 def test_p10_bracketed_never_is_ok(readers):
     readers.setattr(host_check, "read_shmem_enabled", lambda: "[never] always madvise\n")
 
