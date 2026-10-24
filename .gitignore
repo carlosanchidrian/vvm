@@ -1,6 +1,9 @@
 # Especificaciones locales
 SPEC.md
 
+# Registro de actividad de la IA (uso interno, no se sube)
+registro-ia.md
+
 # Bytecode / caché de Python
 __pycache__/
 *.py[cod]
