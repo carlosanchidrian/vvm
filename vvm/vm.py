@@ -14,6 +14,9 @@ import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+# Marcador que identifica el backend de memoria de una sesión VVM en `cmdline`.
+SESSION_MARKER = "memory-backend-memfd,id=mem"
+
 
 @dataclass(frozen=True)
 class VmConfig:
@@ -52,7 +55,7 @@ def build_cmd(
         "-m",
         mem,
         "-object",
-        f"memory-backend-memfd,id=mem,size={mem},share=off",
+        f"{SESSION_MARKER},size={mem},share=off",
         "-machine",
         "q35,memory-backend=mem,dump-guest-core=off,mem-merge=off",
         "-kernel",
