@@ -31,6 +31,14 @@
 - No se hace push ni se fusiona `dev` en `main` sin que lo pida el usuario.
 - `images.py` es módulo propio (decisión validada): disco `memfd` y validación de kernel/initrd.
 
+# Pull requests
+- Todo PR de una rama `feat/tramo-N-*` hacia `dev` usa la plantilla `pr-template.md` de la raíz.
+- Rellenar con datos reales: recuentos de tests ejecutados, comandos y resultado observable.
+- Marcar `[x]` solo lo que se haya ejecutado; lo que dependa del portátil o de KVM queda en `[ ]`.
+- Título y cuerpo en español; el resumen en prosa, no en viñetas.
+- Quitar las secciones de la plantilla que no aporten; un cambio pequeño no necesita tablas.
+- No cerrar ni recrear PRs para reutilizar la plantilla: se actualiza el cuerpo del PR existente.
+
 # Registro de actividad de la IA
 - Mantener `registro-ia.md` en la raíz del repo como constancia del trabajo de la IA.
 - Ese archivo NO se versiona: está en `.gitignore` y nunca debe subirse.
