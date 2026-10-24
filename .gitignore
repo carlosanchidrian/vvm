@@ -1,0 +1,33 @@
+# Especificaciones locales
+SPEC.md
+
+# Bytecode / caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Herramientas
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Editores / sistema
+.idea/
+.vscode/
+*.swp
+.DS_Store
