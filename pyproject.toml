@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vvm"
+version = "0.1.0"
+description = "VMs volátiles sobre QEMU/KVM: RAM y disco solo en memoria"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+vvm = "vvm.cli:main"
+
+[tool.setuptools]
+packages = ["vvm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
