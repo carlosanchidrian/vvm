@@ -133,8 +133,10 @@ def _emit_report(report: str, report_path: str | None) -> None:
     if not report_path:
         print(report)
         return
+    path = Path(report_path)
     try:
-        Path(report_path).write_text(report, encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(report, encoding="utf-8")
     except OSError as exc:
         print(
             f"Error: no se pudo escribir el informe en {report_path}: {exc}",

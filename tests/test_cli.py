@@ -231,6 +231,19 @@ def test_run_escribe_informe_en_fichero(host_ok, monkeypatch, tmp_path, capsys):
     assert f"Informe escrito en {report}" in capsys.readouterr().out
 
 
+def test_run_crea_el_directorio_del_informe(host_ok, monkeypatch, tmp_path, capsys):
+    kernel, initrd = _boot_files(tmp_path)
+    session = tmp_path / "sesion.json"
+    _stub_session(monkeypatch, session)
+    report = tmp_path / "no" / "existe" / "informe.txt"
+
+    args = _run_args(kernel, initrd, "--qemu", "/bin/true", "--report", str(report))
+    assert cli.main(args) == 0
+
+    assert report.is_file()
+    assert report.read_text(encoding="utf-8").startswith("Informe de sesión VVM")
+
+
 def test_run_emite_informe_aunque_qemu_falle(host_ok, monkeypatch, tmp_path, capsys):
     kernel, initrd = _boot_files(tmp_path)
     session = tmp_path / "sesion.json"
