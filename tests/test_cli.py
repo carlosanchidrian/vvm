@@ -218,6 +218,39 @@ def test_run_con_qemu_true_emite_informe_y_guarda_sesion(
     assert saved.forced is False
 
 
+def test_run_cierra_el_disco_antes_de_la_instantanea_final(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    kernel, initrd = _boot_files(tmp_path)
+    session = tmp_path / "sesion.json"
+    monkeypatch.setattr(cli.audit, "default_session_path", lambda: session)
+    fds: list[int] = []
+    _capture_disk_fd(monkeypatch, fds)
+
+    calls = {"n": 0}
+
+    def fake_snapshot():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _snapshot(shmem_kb=1_000)
+        try:
+            os.fstat(fds[0])
+            abierto = True
+        except OSError:
+            abierto = False
+        # Si el disco siguiera abierto, Shmem incluiría 209 MB escritos por el guest.
+        return _snapshot(shmem_kb=1_000 + (209 * 1024 if abierto else 0))
+
+    monkeypatch.setattr(cli.audit, "take_snapshot", fake_snapshot)
+
+    assert cli.main(_run_args(kernel, initrd, "--qemu", "/bin/true")) == 0
+
+    assert calls["n"] == 2
+    out = capsys.readouterr().out
+    assert "delta +0 kB" in out
+    assert "+214016" not in out
+
+
 def test_run_escribe_informe_en_fichero(host_ok, monkeypatch, tmp_path, capsys):
     kernel, initrd = _boot_files(tmp_path)
     session = tmp_path / "sesion.json"
@@ -229,6 +262,19 @@ def test_run_escribe_informe_en_fichero(host_ok, monkeypatch, tmp_path, capsys):
 
     assert report.read_text(encoding="utf-8").startswith("Informe de sesión VVM")
     assert f"Informe escrito en {report}" in capsys.readouterr().out
+
+
+def test_run_crea_el_directorio_del_informe(host_ok, monkeypatch, tmp_path, capsys):
+    kernel, initrd = _boot_files(tmp_path)
+    session = tmp_path / "sesion.json"
+    _stub_session(monkeypatch, session)
+    report = tmp_path / "no" / "existe" / "informe.txt"
+
+    args = _run_args(kernel, initrd, "--qemu", "/bin/true", "--report", str(report))
+    assert cli.main(args) == 0
+
+    assert report.is_file()
+    assert report.read_text(encoding="utf-8").startswith("Informe de sesión VVM")
 
 
 def test_run_emite_informe_aunque_qemu_falle(host_ok, monkeypatch, tmp_path, capsys):

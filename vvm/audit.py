@@ -162,6 +162,8 @@ def _precheck_lines(
             lines.append(
                 f"   {check.id} {label} ({kind}) {check.vector}: {check.evidence}"
             )
+        ok_count = len(checks) - len(failed)
+        lines.append(f"   Resto: {ok_count} comprobaciones OK.")
     else:
         lines.append(f"   Apto: las {len(checks)} comprobaciones salieron OK.")
 

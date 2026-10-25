@@ -12,7 +12,7 @@ para una sesión real.
 
 - Implementado y probado: pre-chequeo P1–P10, disco `memfd`, línea de QEMU,
   informe determinista, CLI (`check`, `run`, `audit`) y persistencia de sesión.
-  **88 tests** con `python3 -m pytest`.
+  **91 tests** con `python3 -m pytest`.
 - Probado en este host: pre-chequeo real (detecta swap activa y apport),
   `--dry-run` y el ciclo `run` → informe → `audit` con un QEMU simulado
   (`--qemu /bin/true`).
@@ -76,7 +76,8 @@ Detalles:
 
 - `--dry-run` imprime la línea final y no ejecuta QEMU ni el pre-chequeo.
 - `--headless` exige `--log`: sin fichero de salida se perdería la consola del guest.
-- `--report RUTA` escribe el informe en un fichero en vez de por pantalla.
+- `--report RUTA` escribe el informe en un fichero en vez de por pantalla
+  (crea el directorio si falta).
 - Para salir de una sesión interactiva: **Ctrl-A x**.
 
 ### `vvm audit` — informe de una sesión
@@ -133,5 +134,5 @@ vvm/
 ├── audit.py        # snapshots, informe y sesión en JSON
 ├── cli.py          # argparse: check | run | audit
 └── __main__.py     # python3 -m vvm
-tests/              # 88 tests, sin KVM
+tests/              # 91 tests, sin KVM
 ```

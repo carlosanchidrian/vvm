@@ -128,13 +128,25 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 1 if host_check.has_blocking(results) else 0
 
 
+def _close_disk_fd(fd: int | None) -> None:
+    """Cierra el fd del disco; el `finally` exterior lo usa como red de seguridad."""
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 def _emit_report(report: str, report_path: str | None) -> None:
     """Imprime el informe o lo escribe en disco, sin perderlo si falla la escritura."""
     if not report_path:
         print(report)
         return
+    path = Path(report_path)
     try:
-        Path(report_path).write_text(report, encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(report, encoding="utf-8")
     except OSError as exc:
         print(
             f"Error: no se pudo escribir el informe en {report_path}: {exc}",
@@ -212,6 +224,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
         finally:
             # El informe sale pase lo que pase: salida normal, Ctrl-C o error de QEMU.
+            # Cerrar el disco antes de medir: si no, Shmem incluye lo que el guest
+            # escribió y el «después» nunca vuelve a la línea base. El finally
+            # exterior queda como red de seguridad si algo falla antes.
+            _close_disk_fd(disk_fd)
+            disk_fd = None
             try:
                 after = audit.take_snapshot()
             except (OSError, RuntimeError) as exc:
@@ -245,11 +262,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
-        if disk_fd is not None:
-            try:
-                os.close(disk_fd)
-            except OSError:
-                pass
+        _close_disk_fd(disk_fd)
 
 
 def cmd_audit(args: argparse.Namespace) -> int:

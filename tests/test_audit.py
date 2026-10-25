@@ -86,6 +86,22 @@ def test_prechequeo_apto_deja_veredicto_limpio():
     assert _last_line(report) == CLEAN_VERDICT
 
 
+def test_prechequeo_con_avisos_indica_el_resto_ok():
+    ok = _check(
+        "P1", "Aceleración KVM disponible", "OK", True, "/dev/kvm accesible", "instala qemu-kvm"
+    )
+    warn = _check(
+        "P5", "Core dumps bajo control", "WARN", False, "|/usr/share/apport/apport", "revisa el handler"
+    )
+
+    report = audit.build_report(_snapshot(), _snapshot(), checks=(ok, warn), forced=False)
+
+    assert "P5 AVISO (no bloqueante) Core dumps bajo control: |/usr/share/apport/apport" in report
+    assert "Resto: 1 comprobaciones OK." in report
+    assert "Apto: las" not in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
 def test_sesion_sin_prechequeo_carga_como_desconocida(tmp_path: Path):
     path = tmp_path / "antigua.json"
     path.write_text(
