@@ -132,7 +132,7 @@ _P5 = _Spec(
     "P5",
     "Core dumps",
     False,
-    "El lanzador ya fija RLIMIT_CORE=0; si persiste, elimina coredump de /proc/sys/kernel/core_pattern.",
+    "Revisa el handler de core_pattern (apport, systemd-coredump).",
 )
 _P6 = _Spec(
     "P6",

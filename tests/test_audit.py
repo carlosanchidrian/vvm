@@ -6,11 +6,13 @@ Los snapshots se fabrican a mano: ningún test toca el `/dev/shm` real.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
 from vvm import audit
+from vvm.host_check import CheckResult
 
 CLEAN_VERDICT = "SIN HALLAZGOS EN LO COMPROBADO"
 
@@ -41,6 +43,76 @@ def _fake_proc(tmp_path: Path, pid: str, cmdline: bytes | None) -> None:
     proc_pid.mkdir()
     if cmdline is not None:
         (proc_pid / "cmdline").write_bytes(cmdline)
+
+
+def _check(
+    check_id: str = "P3",
+    vector: str = "swap",
+    status: str = "FAIL",
+    blocking: bool = True,
+    evidence: str = "swap activa: /swap.img",
+    remediation: str = "sudo swapoff -a",
+) -> CheckResult:
+    return CheckResult(
+        id=check_id,
+        vector=vector,
+        status=status,
+        blocking=blocking,
+        evidence=evidence,
+        remediation=remediation,
+    )
+
+
+def test_prechequeo_forzado_aparece_en_el_informe():
+    p3 = _check()
+    report = audit.build_report(_snapshot(), _snapshot(), checks=(p3,), forced=True)
+
+    assert "0 · Pre-chequeo de la sesión" in report
+    assert "P3 FALLA (bloqueante) swap: swap activa: /swap.img" in report
+    assert "Forzada: sí (1 fallo(s) bloqueante(s) ignorados)." in report
+    assert _last_line(report) == (
+        "SIN HALLAZGOS EN LO COMPROBADO · sesión forzada con 1 fallo(s) bloqueante(s)"
+    )
+
+
+def test_prechequeo_apto_deja_veredicto_limpio():
+    ok = _check("P1", "Aceleración", "OK", True, "/dev/kvm accesible", "instala qemu-kvm")
+
+    report = audit.build_report(_snapshot(), _snapshot(), checks=(ok,), forced=False)
+
+    assert "Apto: las 1 comprobaciones salieron OK." in report
+    assert "FALLA" not in report
+    assert "Forzada: no." in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_sesion_sin_prechequeo_carga_como_desconocida(tmp_path: Path):
+    path = tmp_path / "antigua.json"
+    path.write_text(
+        json.dumps({"before": asdict(_snapshot()), "after": asdict(_snapshot())}),
+        encoding="utf-8",
+    )
+
+    session = audit.load_session_full(path)
+
+    assert session.checks is None
+    assert session.forced is False
+    report = audit.build_report(
+        session.before, session.after, checks=session.checks, forced=session.forced
+    )
+    assert "Desconocido: la sesión no guardó el pre-chequeo." in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_save_load_conserva_prechequeo(tmp_path: Path):
+    path = tmp_path / "sesion.json"
+    p3 = _check()
+
+    audit.save_session(path, _snapshot(), _snapshot(), checks=(p3,), forced=True)
+
+    session = audit.load_session_full(path)
+    assert session.checks == (p3,)
+    assert session.forced is True
 
 
 def test_nueva_entrada_en_shm_es_hallazgo():

@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from vvm.host_check import CheckResult
 from vvm.vm import SESSION_MARKER
 
 MEMINFO_PATH = Path("/proc/meminfo")
@@ -35,6 +36,16 @@ class Snapshot:
     shm_entries: tuple[str, ...]
     qemu_pids: tuple[str, ...]
     taken_at: str
+
+
+@dataclass(frozen=True)
+class Session:
+    """Sesión guardada: snapshots más el pre-chequeo que la autorizó."""
+
+    before: Snapshot
+    after: Snapshot
+    checks: tuple[CheckResult, ...] | None = None
+    forced: bool = False
 
 
 def read_meminfo(path: Path = MEMINFO_PATH) -> dict[str, int]:
@@ -121,12 +132,61 @@ def take_snapshot() -> Snapshot:
     )
 
 
+_STATUS_LABELS = {"OK": "OK", "WARN": "AVISO", "FAIL": "FALLA"}
+
+
+def _blocking_failures(
+    checks: tuple[CheckResult, ...] | None,
+) -> tuple[CheckResult, ...]:
+    """Comprobaciones en FALLA que bloquean el arranque."""
+    if not checks:
+        return ()
+    return tuple(check for check in checks if check.status == "FAIL" and check.blocking)
+
+
+def _precheck_lines(
+    checks: tuple[CheckResult, ...] | None,
+    forced: bool,
+) -> list[str]:
+    """Sección 0: qué dijo el pre-chequeo y si se arrancó con `--force`."""
+    lines = ["0 · Pre-chequeo de la sesión"]
+    if checks is None:
+        lines.append("   Desconocido: la sesión no guardó el pre-chequeo.")
+        return lines
+
+    failed = [check for check in checks if check.status != "OK"]
+    if failed:
+        for check in failed:
+            label = _STATUS_LABELS.get(check.status, check.status)
+            kind = "bloqueante" if check.blocking else "no bloqueante"
+            lines.append(
+                f"   {check.id} {label} ({kind}) {check.vector}: {check.evidence}"
+            )
+    else:
+        lines.append(f"   Apto: las {len(checks)} comprobaciones salieron OK.")
+
+    blocking = len(_blocking_failures(checks))
+    if forced and blocking:
+        lines.append(f"   Forzada: sí ({blocking} fallo(s) bloqueante(s) ignorados).")
+    else:
+        lines.append(f"   Forzada: {'sí' if forced else 'no'}.")
+    return lines
+
+
 def build_report(
     before: Snapshot,
     after: Snapshot,
     log_path: str | None = None,
+    *,
+    checks: tuple[CheckResult, ...] | None = None,
+    forced: bool = False,
 ) -> str:
-    """Genera el informe de la sesión con las secciones y el veredicto de SPEC §6."""
+    """Genera el informe de la sesión con las secciones y el veredicto de SPEC §6.
+
+    `checks` es el pre-chequeo que autorizó la sesión; `None` significa que la
+    sesión guardada no lo incluía (formato antiguo). `forced` indica si se
+    arrancó con `--force`.
+    """
     new_entries = sorted(set(after.shm_entries) - set(before.shm_entries))
     findings: list[str] = []
     findings.extend(f"entrada nueva en /dev/shm: {name}" for name in new_entries)
@@ -134,11 +194,21 @@ def build_report(
         f"proceso QEMU vivo al cierre: pid {pid}"
         for pid in sorted(after.qemu_pids, key=_pid_sort_key)
     )
+    blocking = _blocking_failures(checks)
+    forced_note = ""
+    if blocking:
+        forced_note = (
+            f" · sesión forzada con {len(blocking)} fallo(s) bloqueante(s)"
+        )
+    elif forced and checks is None:
+        forced_note = " · sesión forzada"
 
     lines = [
         "Informe de sesión VVM (determinista, sin IA)",
         f"Línea base: {before.taken_at}",
         f"Cierre:     {after.taken_at}",
+        "",
+        *_precheck_lines(checks, forced),
         "",
         "1. Entradas de /dev/shm",
         f"   Antes:   {_format_entries(before.shm_entries)}",
@@ -174,9 +244,12 @@ def build_report(
         "   - la propia herramienta (VVM): no se audita a sí misma.",
         "",
         "6. Veredicto",
-        "SIN HALLAZGOS EN LO COMPROBADO"
-        if not findings
-        else "HALLAZGOS: " + "; ".join(findings),
+        (
+            "SIN HALLAZGOS EN LO COMPROBADO"
+            if not findings
+            else "HALLAZGOS: " + "; ".join(findings)
+        )
+        + forced_note,
     ]
     return "\n".join(lines) + "\n"
 
@@ -210,9 +283,21 @@ def default_session_path() -> Path:
     return base / "vvm" / "last-session.json"
 
 
-def save_session(path: Path, before: Snapshot, after: Snapshot) -> None:
-    """Guarda la línea base y el cierre en JSON."""
-    document = {"before": _snapshot_to_dict(before), "after": _snapshot_to_dict(after)}
+def save_session(
+    path: Path,
+    before: Snapshot,
+    after: Snapshot,
+    checks: tuple[CheckResult, ...] | None = None,
+    forced: bool = False,
+) -> None:
+    """Guarda snapshots y, si se conoce, el pre-chequeo de la sesión en JSON."""
+    document: dict[str, object] = {
+        "before": _snapshot_to_dict(before),
+        "after": _snapshot_to_dict(after),
+        "forced": bool(forced),
+    }
+    if checks is not None:
+        document["checks"] = [asdict(check) for check in checks]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -223,8 +308,12 @@ def save_session(path: Path, before: Snapshot, after: Snapshot) -> None:
         raise RuntimeError(f"No se pudo guardar la sesión en {path}: {exc}") from exc
 
 
-def load_session(path: Path) -> tuple[Snapshot, Snapshot]:
-    """Carga una sesión guardada y devuelve (antes, después)."""
+def load_session_full(path: Path) -> Session:
+    """Carga una sesión y devuelve también su pre-chequeo.
+
+    Las sesiones antiguas sin `checks` se cargan con `checks=None`; las que no
+    tienen `forced` se consideran no forzadas.
+    """
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -240,10 +329,35 @@ def load_session(path: Path) -> tuple[Snapshot, Snapshot]:
     missing = [key for key in ("before", "after") if key not in document]
     if missing:
         raise ValueError(f"Faltan las claves {', '.join(missing)} en la sesión {path}.")
-    return (
-        _snapshot_from_dict(document["before"], "before", path),
-        _snapshot_from_dict(document["after"], "after", path),
+
+    checks_raw = document.get("checks")
+    if checks_raw is None:
+        checks: tuple[CheckResult, ...] | None = None
+    else:
+        if not isinstance(checks_raw, list):
+            raise ValueError(
+                f"El campo 'checks' de la sesión {path} debe ser una lista."
+            )
+        checks = tuple(_check_from_dict(item, path) for item in checks_raw)
+
+    forced = document.get("forced", False)
+    if not isinstance(forced, bool):
+        raise ValueError(
+            f"El campo 'forced' de la sesión {path} debe ser verdadero o falso."
+        )
+
+    return Session(
+        before=_snapshot_from_dict(document["before"], "before", path),
+        after=_snapshot_from_dict(document["after"], "after", path),
+        checks=checks,
+        forced=forced,
     )
+
+
+def load_session(path: Path) -> tuple[Snapshot, Snapshot]:
+    """Carga una sesión guardada y devuelve (antes, después)."""
+    session = load_session_full(path)
+    return session.before, session.after
 
 
 def _snapshot_to_dict(snapshot: Snapshot) -> dict[str, object]:
@@ -257,6 +371,45 @@ def _snapshot_to_dict(snapshot: Snapshot) -> dict[str, object]:
 
 
 _FIELDS = ("shmem_kb", "mem_available_kb", "shm_entries", "qemu_pids", "taken_at")
+_CHECK_FIELDS = ("id", "vector", "status", "blocking", "evidence", "remediation")
+_CHECK_STRINGS = ("id", "vector", "status", "evidence", "remediation")
+
+
+def _check_from_dict(raw: object, path: Path) -> CheckResult:
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"Cada comprobación de la sesión {path} debe ser un objeto JSON."
+        )
+    missing = [field for field in _CHECK_FIELDS if field not in raw]
+    if missing:
+        raise ValueError(
+            f"Faltan los campos {', '.join(missing)} en una comprobación "
+            f"de la sesión {path}."
+        )
+    for field in _CHECK_STRINGS:
+        if not isinstance(raw[field], str):
+            raise ValueError(
+                f"El campo '{field}' de una comprobación de la sesión {path} "
+                "debe ser una cadena."
+            )
+    if raw["status"] not in _STATUS_LABELS:
+        raise ValueError(
+            f"Estado desconocido en una comprobación de la sesión {path}: "
+            f"{raw['status']!r}."
+        )
+    if not isinstance(raw["blocking"], bool):
+        raise ValueError(
+            f"El campo 'blocking' de una comprobación de la sesión {path} "
+            "debe ser verdadero o falso."
+        )
+    return CheckResult(
+        id=raw["id"],
+        vector=raw["vector"],
+        status=raw["status"],
+        blocking=raw["blocking"],
+        evidence=raw["evidence"],
+        remediation=raw["remediation"],
+    )
 
 
 def _snapshot_from_dict(raw: object, block: str, path: Path) -> Snapshot:
