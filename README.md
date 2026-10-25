@@ -12,7 +12,7 @@ para una sesión real.
 
 - Implementado y probado: pre-chequeo P1–P10, disco `memfd`, línea de QEMU,
   informe determinista, CLI (`check`, `run`, `audit`) y persistencia de sesión.
-  **81 tests** con `python3 -m pytest`.
+  **87 tests** con `python3 -m pytest`.
 - Probado en este host: pre-chequeo real (detecta swap activa y apport),
   `--dry-run` y el ciclo `run` → informe → `audit` con un QEMU simulado
   (`--qemu /bin/true`).
@@ -29,6 +29,10 @@ para una sesión real.
   Opcionalmente, `pip install .` instala el comando `vvm`.
 
 ## Uso
+
+```bash
+python3 -m vvm --version   # vvm 0.1.0
+```
 
 ### `vvm check` — pre-chequeo del anfitrión
 
@@ -59,8 +63,9 @@ Secuencia:
 4. Ejecuta P1–P10. Si hay bloqueos, cierra el fd y no arranca (`--force` los ignora).
 5. Toma la línea base (Shmem, MemAvailable, `/dev/shm`, QEMU vivos).
 6. Lanza QEMU heredando el fd del disco.
-7. Al salir —normal, error o Ctrl-C— cierra el fd, imprime el informe y guarda la
-   sesión en `$XDG_STATE_HOME/vvm/last-session.json` (por defecto
+7. Al salir —normal, error o Ctrl-C— cierra el fd, imprime el informe (con el
+   pre-chequeo en la sección 0) y guarda la sesión en
+   `$XDG_STATE_HOME/vvm/last-session.json` (por defecto
    `~/.local/state/vvm/last-session.json`).
 
 Detalles:
@@ -77,10 +82,12 @@ python3 -m vvm audit [--session RUTA]
 ```
 
 Sin `--session`, lee la última sesión guardada por `run`. Imprime el informe
-determinista: entradas nuevas en `/dev/shm`, procesos QEMU de esa sesión vivos
-al cierre, deltas de Shmem/MemAvailable, log serie declarado y las exclusiones
-de alcance. La ruta del log no se persiste en la sesión, así que al reconstruir
-el informe desde `audit` la sección del log sale vacía.
+determinista: pre-chequeo de la sesión (sección 0), entradas nuevas en `/dev/shm`,
+procesos QEMU de esa sesión vivos al cierre, deltas de Shmem/MemAvailable, log
+serie declarado y las exclusiones de alcance. Si se arrancó con `--force` y había
+fallos bloqueantes, el veredicto lo dice. La ruta del log no se persiste en la
+sesión, así que al reconstruir el informe desde `audit` la sección del log sale
+vacía.
 
 ## Qué garantiza la línea de QEMU
 
@@ -122,5 +129,5 @@ vvm/
 ├── audit.py        # snapshots, informe y sesión en JSON
 ├── cli.py          # argparse: check | run | audit
 └── __main__.py     # python3 -m vvm
-tests/              # 81 tests, sin KVM
+tests/              # 87 tests, sin KVM
 ```

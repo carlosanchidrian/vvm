@@ -124,6 +124,14 @@ def test_main_sin_subcomando_sale_2(capsys):
     assert "usage:" in capsys.readouterr().out
 
 
+def test_version(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--version"])
+
+    assert excinfo.value.code == 0
+    assert capsys.readouterr().out.strip() == "vvm 0.1.0"
+
+
 # --- run -----------------------------------------------------------------
 
 
@@ -183,6 +191,9 @@ def test_run_con_qemu_true_emite_informe_y_guarda_sesion(
     assert "SIN HALLAZGOS EN LO COMPROBADO" in out
     before, after = audit.load_session(session)
     assert before == after == _snapshot()
+    saved = audit.load_session_full(session)
+    assert len(saved.checks or ()) == 10
+    assert saved.forced is False
 
 
 def test_run_escribe_informe_en_fichero(host_ok, monkeypatch, tmp_path, capsys):
@@ -235,9 +246,19 @@ def test_run_force_ignora_bloqueos(host_ok, monkeypatch, tmp_path, capsys):
 
     assert cli.main(_run_args(kernel, initrd, "--force")) == 0
 
-    out = capsys.readouterr().out
-    assert "P3 FALLA" in out
-    assert "SIN HALLAZGOS EN LO COMPROBADO" in out
+    captured = capsys.readouterr()
+    assert "P3 FALLA" in captured.out
+    assert "SIN HALLAZGOS EN LO COMPROBADO" in captured.out
+    assert (
+        "Arrancando con 1 fallo(s) bloqueante(s) ignorados por --force"
+        in captured.err
+    )
+    saved = audit.load_session_full(session)
+    assert saved.forced is True
+    assert any(
+        check.id == "P3" and check.status == "FAIL"
+        for check in (saved.checks or ())
+    )
 
 
 def test_run_headless_sin_log_sale_1(host_ok, monkeypatch, tmp_path, capsys):
@@ -256,7 +277,9 @@ def test_audit_sin_sesion_sale_1(tmp_path, capsys):
 
     assert cli.main(["audit", "--session", str(missing)]) == 1
 
-    assert "No hay sesión que auditar" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "No hay sesión que auditar" in err
+    assert err.count(str(missing)) == 1
 
 
 def test_audit_imprime_sesion_guardada(tmp_path, capsys):
@@ -270,6 +293,28 @@ def test_audit_imprime_sesion_guardada(tmp_path, capsys):
     assert cli.main(["audit", "--session", str(session)]) == 0
 
     assert "HALLAZGOS: entrada nueva en /dev/shm: vvm-nueva" in capsys.readouterr().out
+
+
+def test_audit_reconstruye_prechequeo_forzado(tmp_path, capsys):
+    session = tmp_path / "sesion.json"
+    p3 = host_check.CheckResult(
+        id="P3",
+        vector="swap",
+        status="FAIL",
+        blocking=True,
+        evidence="swap activa: /swap.img",
+        remediation="sudo swapoff -a",
+    )
+    audit.save_session(session, _snapshot(), _snapshot(), checks=(p3,), forced=True)
+
+    assert cli.main(["audit", "--session", str(session)]) == 0
+
+    out = capsys.readouterr().out
+    assert "P3 FALLA (bloqueante) swap: swap activa: /swap.img" in out
+    assert (
+        "SIN HALLAZGOS EN LO COMPROBADO · sesión forzada con 1 fallo(s) bloqueante(s)"
+        in out
+    )
 
 
 def test_audit_usa_la_sesion_por_defecto(monkeypatch, tmp_path, capsys):

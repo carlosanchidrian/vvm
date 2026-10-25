@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
-from vvm import audit, host_check, images, vm
+from vvm import __version__, audit, host_check, images, vm
 from vvm.host_check import CheckResult
 
 # `vvm check` no arranca nada: estos nombres solo rellenan la línea que P7 y P9
@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="vvm",
         description="VMs volátiles sobre QEMU/KVM: RAM y disco solo en memoria.",
     )
+    parser.add_argument("--version", action="version", version=f"vvm {__version__}")
     subparsers = parser.add_subparsers(dest="command", metavar="{check,run,audit}")
 
     check = subparsers.add_parser("check", help="pre-chequeo P1-P10 del anfitrión")
@@ -160,13 +161,24 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         results = host_check.check_host(args.mem, args.disk, cmd)
         print(_format_results(results))
-        if host_check.has_blocking(results) and not args.force:
+        blocking = [
+            result
+            for result in results
+            if result.status == "FAIL" and result.blocking
+        ]
+        if blocking and not args.force:
             print(
                 "No se arranca la VM: hay fallos bloqueantes "
                 "(usa --force para ignorarlos).",
                 file=sys.stderr,
             )
             return 1
+        if blocking and args.force:
+            print(
+                f"Arrancando con {len(blocking)} fallo(s) bloqueante(s) "
+                "ignorados por --force",
+                file=sys.stderr,
+            )
 
         before = audit.take_snapshot()
         exit_code = 0
@@ -189,10 +201,25 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
                 after = before
             try:
-                audit.save_session(audit.default_session_path(), before, after)
+                audit.save_session(
+                    audit.default_session_path(),
+                    before,
+                    after,
+                    checks=tuple(results),
+                    forced=args.force,
+                )
             except (OSError, RuntimeError) as exc:
                 print(f"Aviso: no se pudo guardar la sesión: {exc}", file=sys.stderr)
-            _emit_report(audit.build_report(before, after, args.log), args.report)
+            _emit_report(
+                audit.build_report(
+                    before,
+                    after,
+                    args.log,
+                    checks=tuple(results),
+                    forced=args.force,
+                ),
+                args.report,
+            )
         return exit_code
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -207,12 +234,25 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_audit(args: argparse.Namespace) -> int:
     path = Path(args.session) if args.session else audit.default_session_path()
-    try:
-        before, after = audit.load_session(path)
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"No hay sesión que auditar en {path}: {exc}", file=sys.stderr)
+    if not path.exists():
+        print(
+            f"No hay sesión que auditar en {path}. Ejecuta primero `vvm run`.",
+            file=sys.stderr,
+        )
         return 1
-    print(audit.build_report(before, after))
+    try:
+        session = audit.load_session_full(path)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"No se pudo cargar la sesión: {exc}", file=sys.stderr)
+        return 1
+    print(
+        audit.build_report(
+            session.before,
+            session.after,
+            checks=session.checks,
+            forced=session.forced,
+        )
+    )
     return 0
 
 
