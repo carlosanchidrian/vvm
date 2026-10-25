@@ -121,41 +121,46 @@ class _Spec:
 
 _P1 = _Spec(
     "P1",
-    "Aceleración",
+    "Aceleración KVM disponible",
     True,
     'Instala qemu-kvm y añade tu usuario al grupo kvm: sudo apt install qemu-kvm && sudo usermod -aG kvm "$USER"',
 )
-_P2 = _Spec("P2", "RAM", True, "Cierra aplicaciones o reduce --mem y --disk.")
-_P3 = _Spec("P3", "swap", True, "Desactiva la swap: sudo swapoff -a.")
-_P4 = _Spec("P4", "Hibernación", False, "Enmascara la hibernación: sudo systemctl mask hibernate.target.")
+_P2 = _Spec("P2", "Memoria RAM suficiente", True, "Cierra aplicaciones o reduce --mem y --disk.")
+_P3 = _Spec("P3", "Sin swap activa", True, "Desactiva la swap: sudo swapoff -a.")
+_P4 = _Spec("P4", "Hibernación desactivada", False, "Enmascara la hibernación: sudo systemctl mask hibernate.target.")
 _P5 = _Spec(
     "P5",
-    "Core dumps",
+    "Core dumps bajo control",
     False,
     "Revisa el handler de core_pattern (apport, systemd-coredump).",
 )
 _P6 = _Spec(
     "P6",
-    "KSM",
+    "KSM desactivado",
     False,
     "El lanzador pasa mem-merge=off; si persiste: echo 0 | sudo tee /sys/kernel/mm/ksm/run",
 )
-_P7 = _Spec("P7", "Volcado de RAM del guest", True, "No arranques sin dump-guest-core=off en -machine.")
+_P7 = _Spec(
+    "P7",
+    "Sin volcado de la RAM del guest",
+    True,
+    "No arranques sin dump-guest-core=off en -machine.",
+)
 _P8 = _Spec(
     "P8",
-    "/dev/shm",
+    "Sin restos vvm-* en /dev/shm",
     True,
     f"Elimina manualmente los restos vvm-* de {SHM_DIR} (vvm no los borra).",
 )
 _P9 = _Spec(
     "P9",
-    "Anonimato",
+    "Anonimato del backend y del disco",
     True,
     "No arranques sin share=off en el backend memfd ni sin el disco por fd (file=/dev/fd/N).",
 )
 _P10 = _Spec(
     "P10",
-    "THP en shmem",
+    "THP en shmem desactivado",
     False,
     "Desactiva THP en shmem: echo never | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled",
 )

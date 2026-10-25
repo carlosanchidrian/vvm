@@ -12,7 +12,7 @@ para una sesión real.
 
 - Implementado y probado: pre-chequeo P1–P10, disco `memfd`, línea de QEMU,
   informe determinista, CLI (`check`, `run`, `audit`) y persistencia de sesión.
-  **87 tests** con `python3 -m pytest`.
+  **88 tests** con `python3 -m pytest`.
 - Probado en este host: pre-chequeo real (detecta swap activa y apport),
   `--dry-run` y el ciclo `run` → informe → `audit` con un QEMU simulado
   (`--qemu /bin/true`).
@@ -43,6 +43,10 @@ python3 -m vvm check [--mem 512] [--disk 256] [--json]
 Ejecuta P1–P10 y sale con código 1 si alguna comprobación **bloqueante** falla.
 `--json` devuelve la lista de resultados para consumo mecánico. Los avisos
 (P4–P6, P10) se muestran pero no bloquean; el remedio de cada uno va en la salida.
+Cada entrada muestra el nombre del chequeo y, en una terminal, sale en verde
+(OK), amarillo (aviso) o rojo (falla); el color se desactiva solo si la salida
+no es un TTY o si defines `NO_COLOR`. El id (P1–P10) se mantiene en `--json`
+y en el informe de sesión.
 
 ### `vvm run` — la sesión
 
@@ -129,5 +133,5 @@ vvm/
 ├── audit.py        # snapshots, informe y sesión en JSON
 ├── cli.py          # argparse: check | run | audit
 └── __main__.py     # python3 -m vvm
-tests/              # 87 tests, sin KVM
+tests/              # 88 tests, sin KVM
 ```

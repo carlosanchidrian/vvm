@@ -28,6 +28,8 @@ _PLACEHOLDER_KERNEL = "<kernel>"
 _PLACEHOLDER_INITRD = "<initrd>"
 
 _STATUS_LABELS = {"OK": "OK", "WARN": "AVISO", "FAIL": "FALLA"}
+_STATUS_COLORS = {"OK": "\033[32m", "WARN": "\033[33m", "FAIL": "\033[31m"}
+_COLOR_RESET = "\033[0m"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,18 +75,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _stdout_supports_color() -> bool:
+    """Color solo en terminal interactivo y si `NO_COLOR` no está definido."""
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
 def _format_results(results: Sequence[CheckResult]) -> str:
-    """Salida legible del pre-chequeo, con remedio solo cuando hace falta."""
+    """Salida legible del pre-chequeo: nombre, id, estado con color y remedio."""
+    color = _stdout_supports_color()
     blocks: list[str] = []
     for result in results:
         label = _STATUS_LABELS[result.status]
-        line = f"{result.id} {label:<5} {result.vector}: {result.evidence}"
+        tag = f"[{label}]"
+        line = f"{tag:<7} {result.vector}: {result.evidence}"
+        if color:
+            line = f"{_STATUS_COLORS[result.status]}{line}{_COLOR_RESET}"
         if result.status != "OK":
             line += f"\n   Remedio: {result.remediation}"
         blocks.append(line)
-    blocking = sum(1 for result in results if result.status == "FAIL" and result.blocking)
+
+    blocking = [
+        result for result in results if result.status == "FAIL" and result.blocking
+    ]
+    warnings = [result for result in results if result.status == "WARN"]
     if blocking:
-        blocks.append(f"\nVeredicto: {blocking} fallo(s) bloqueante(s).")
+        names = ", ".join(result.vector for result in blocking)
+        blocks.append(
+            f"\nVeredicto: NO apto — {len(blocking)} fallo(s) bloqueante(s): {names}."
+        )
+    elif warnings:
+        blocks.append(f"\nVeredicto: apto para arrancar, con {len(warnings)} aviso(s).")
     else:
         blocks.append("\nVeredicto: apto para arrancar.")
     return "\n".join(blocks)

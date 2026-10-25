@@ -74,9 +74,11 @@ def test_check_apto_sale_0(host_ok, capsys):
     assert cli.main(["check"]) == 0
 
     out = capsys.readouterr().out
-    assert "P1 OK" in out
-    assert "P8 OK" in out
+    assert "Aceleración KVM disponible:" in out
+    assert "Sin restos vvm-* en /dev/shm:" in out
+    assert "(P1)" not in out and "(P8)" not in out
     assert "apto para arrancar" in out
+    assert "\033[" not in out
 
 
 def test_check_con_swap_sale_1(host_ok, monkeypatch, capsys):
@@ -85,7 +87,9 @@ def test_check_con_swap_sale_1(host_ok, monkeypatch, capsys):
     assert cli.main(["check"]) == 1
 
     out = capsys.readouterr().out
-    assert "P3 FALLA" in out
+    assert "[FALLA]" in out
+    assert "Sin swap activa:" in out
+    assert "(P3)" not in out
     assert "/swap.img" in out
     assert "fallo(s) bloqueante(s)" in out
 
@@ -95,7 +99,10 @@ def test_check_sin_kvm_sale_1(host_ok, monkeypatch, capsys):
 
     assert cli.main(["check"]) == 1
 
-    assert "P1 FALLA" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "[FALLA]" in out
+    assert "Aceleración KVM disponible:" in out
+    assert "(P1)" not in out
 
 
 def test_check_memoria_baja_sale_1(host_ok, monkeypatch, capsys):
@@ -104,8 +111,22 @@ def test_check_memoria_baja_sale_1(host_ok, monkeypatch, capsys):
     assert cli.main(["check"]) == 1
 
     out = capsys.readouterr().out
-    assert "P2 FALLA" in out
+    assert "[FALLA]" in out
+    assert "Memoria RAM suficiente:" in out
+    assert "(P2)" not in out
     assert "necesario=1280 MB" in out
+
+
+def test_check_colorea_las_entradas_con_tty(host_ok, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_stdout_supports_color", lambda: True)
+    monkeypatch.setattr(host_check, "read_swaps", lambda: SWAP_ACTIVE)
+
+    assert cli.main(["check"]) == 1
+
+    out = capsys.readouterr().out
+    assert "\033[31m" in out
+    assert "\033[32m" in out
+    assert "\033[0m" in out
 
 
 def test_check_json_estructura(host_ok, capsys):
@@ -171,7 +192,8 @@ def test_run_con_bloqueo_aborta_y_cierra_fd(host_ok, monkeypatch, tmp_path, caps
     assert cli.main(_run_args(kernel, initrd)) == 1
 
     captured = capsys.readouterr()
-    assert "P3 FALLA" in captured.out
+    assert "[FALLA]" in captured.out
+    assert "Sin swap activa:" in captured.out
     assert "--force" in captured.err
     with pytest.raises(OSError):
         os.fstat(fds[0])
@@ -247,7 +269,8 @@ def test_run_force_ignora_bloqueos(host_ok, monkeypatch, tmp_path, capsys):
     assert cli.main(_run_args(kernel, initrd, "--force")) == 0
 
     captured = capsys.readouterr()
-    assert "P3 FALLA" in captured.out
+    assert "[FALLA]" in captured.out
+    assert "Sin swap activa:" in captured.out
     assert "SIN HALLAZGOS EN LO COMPROBADO" in captured.out
     assert (
         "Arrancando con 1 fallo(s) bloqueante(s) ignorados por --force"
