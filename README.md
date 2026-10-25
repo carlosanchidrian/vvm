@@ -8,19 +8,6 @@ del guest desaparecen con ella.
 Sin dependencias externas: solo biblioteca estándar de Python 3.11+ y QEMU/KVM
 para una sesión real.
 
-## Estado
-
-- Implementado y probado: pre-chequeo P1–P10, disco `memfd`, línea de QEMU,
-  informe determinista, CLI (`check`, `run`, `audit`) y persistencia de sesión.
-  **91 tests** con `python3 -m pytest`.
-- Probado en este host: pre-chequeo real (detecta swap activa y apport),
-  `--dry-run` y el ciclo `run` → informe → `audit` con un QEMU simulado
-  (`--qemu /bin/true`).
-- Pendiente de validar en hardware real: arranque del guest, disco como
-  `/dev/vda` con el tamaño pedido y `write_bytes == 0` mientras el guest escribe.
-- Fuera de alcance en esta fase: TUI, perfiles de escenario, red aislada,
-  multi-VM, IA integrada y empaquetado (`pipx`, `.deb`).
-
 ## Requisitos
 
 - Linux con QEMU (`qemu-system-x86_64`) y `/dev/kvm` accesible para una sesión real.
@@ -40,13 +27,14 @@ python3 -m vvm --version   # vvm 0.1.0
 python3 -m vvm check [--mem 512] [--disk 256] [--json]
 ```
 
-Ejecuta P1–P10 y sale con código 1 si alguna comprobación **bloqueante** falla.
-`--json` devuelve la lista de resultados para consumo mecánico. Los avisos
-(P4–P6, P10) se muestran pero no bloquean; el remedio de cada uno va en la salida.
-Cada entrada muestra el nombre del chequeo y, en una terminal, sale en verde
-(OK), amarillo (aviso) o rojo (falla); el color se desactiva solo si la salida
-no es un TTY o si defines `NO_COLOR`. El id (P1–P10) se mantiene en `--json`
-y en el informe de sesión.
+Ejecuta las diez comprobaciones del anfitrión y sale con código 1 si alguna
+**bloqueante** falla. `--json` devuelve la lista de resultados para consumo
+mecánico. Los avisos (hibernación, core dumps, KSM y THP en shmem) se muestran
+pero no bloquean; el remedio de cada uno va en la salida. Cada entrada muestra
+el nombre del chequeo y, en una terminal, sale en verde (OK), amarillo (aviso)
+o rojo (falla); el color se desactiva solo si la salida no es un TTY o si
+defines `NO_COLOR`. La salida `--json` y el informe conservan además un
+identificador interno por comprobación.
 
 ### `vvm run` — la sesión
 
@@ -63,8 +51,10 @@ Secuencia:
 
 1. Valida que kernel e initrd existen y no están vacíos.
 2. Crea el disco del guest en un `memfd` (256 MiB por defecto).
-3. Construye la línea de QEMU (P7 y P9 la necesitan).
-4. Ejecuta P1–P10. Si hay bloqueos, cierra el fd y no arranca (`--force` los ignora).
+3. Construye la línea de QEMU (la necesitan los chequeos de volcado de RAM
+   y anonimato).
+4. Ejecuta el pre-chequeo del anfitrión. Si hay bloqueos, cierra el fd y no
+   arranca (`--force` los ignora).
 5. Toma la línea base (Shmem, MemAvailable, `/dev/shm`, QEMU vivos).
 6. Lanza QEMU heredando el fd del disco.
 7. Al salir —normal, error o Ctrl-C— cierra el fd, imprime el informe (con el
@@ -128,7 +118,7 @@ Estructura:
 
 ```
 vvm/
-├── host_check.py   # P1–P10 con lectores sustituibles
+├── host_check.py   # comprobaciones del anfitrión con lectores sustituibles
 ├── images.py       # disco memfd + validación de kernel/initrd
 ├── vm.py           # línea de QEMU y ciclo de vida
 ├── audit.py        # snapshots, informe y sesión en JSON
