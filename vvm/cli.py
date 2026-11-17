@@ -378,7 +378,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         # 6. Línea base limpia: antes de crear el disco y de copiar el ISO.
         before = audit.take_snapshot()
-        extras = audit.SessionExtras(image_mode=bool(args.image))
+        extras = audit.SessionExtras(
+            image_mode=bool(args.image), disk_mb=args.disk
+        )
         # 7. Medios ya autorizados por el pre-chequeo. El disco disperso (`memfd`
         # + `ftruncate`) no ocupa RAM hasta que el guest escribe; el ISO sí se
         # copia entero.
@@ -400,6 +402,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 closure=_closure_label(outcome.interrupt),
                 killed_after=outcome.killed_after,
                 image_mode=bool(args.image),
+                disk_mb=args.disk,
                 process_io=outcome.process_io,
             )
         except KeyboardInterrupt:
@@ -408,6 +411,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             extras = audit.SessionExtras(
                 closure="Ctrl-C",
                 image_mode=bool(args.image),
+                disk_mb=args.disk,
             )
             print(
                 "Sesión interrumpida; se emite el informe igualmente.",

@@ -115,7 +115,9 @@ anfitrión, no del guest—, procesos QEMU de esa sesión vivos al cierre, delta
 Shmem/MemAvailable, contadores de I/O de QEMU leídos con la VM viva, cierre y
 resultado de `--wipe`, log serie declarado y las exclusiones de alcance. En una
 sesión con ventana, si `write_bytes` no es cero el informe lo declara como I/O
-del anfitrión con GUI, nunca como acceso a bloque del guest; en modo kernel,
+del anfitrión con GUI; con `--disk 256` (el valor por defecto) la frase no
+afirma que no haya dispositivo de bloque: dice que la I/O no se puede atribuir
+solo al anfitrión, porque el guest tiene un disco virtio. En modo kernel,
 `write_bytes=0` es el testigo. Si se arrancó con `--force` y había fallos
 bloqueantes, el veredicto lo dice. La ruta del log no se persiste en la sesión,
 así que al reconstruir el informe desde `audit` la sección del log sale vacía.

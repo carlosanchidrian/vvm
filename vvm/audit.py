@@ -69,6 +69,7 @@ class SessionExtras:
     killed_after: float | None = None
     wipe: WipeInfo | None = None
     image_mode: bool = False
+    disk_mb: int = 0
     process_io: ProcessIO | None = None
 
 
@@ -285,10 +286,7 @@ def build_report(
     )
     if details.process_io is not None:
         if details.image_mode and details.process_io.write_bytes > 0:
-            findings.append(
-                f"I/O del anfitrión con GUI: {details.process_io.write_bytes} B; "
-                "QEMU no tiene ningún dispositivo de bloque abierto"
-            )
+            findings.append(_guest_io_note(details))
         elif not details.image_mode and details.process_io.write_bytes > 0:
             findings.append(
                 "I/O de disco inesperada en modo kernel: "
@@ -337,7 +335,7 @@ def build_report(
         "   limpia no se le puede atribuir al guest ninguna variación.",
         "",
         "4. I/O del proceso QEMU",
-        *_process_io_lines(details.process_io, details.image_mode),
+        *_process_io_lines(details.process_io, details.image_mode, details.disk_mb),
         "",
         "5. Log serie",
         *_log_lines(log_path),
@@ -380,7 +378,29 @@ def _delta(before: int, after: int) -> str:
     return f"{after - before:+d}"
 
 
-def _process_io_lines(io: ProcessIO | None, image_mode: bool) -> list[str]:
+def _guest_io_note(extras: SessionExtras) -> str:
+    """Lectura de las escrituras de una sesión con ventana, según haya disco.
+
+    Con `--disk 0` no hay ningún disco de datos escribible y se mantiene la
+    frase de la especificación; con disco virtio no se puede afirmar que QEMU
+    no tenga dispositivo de bloque, así que se declara sin atribuir.
+    """
+    assert extras.process_io is not None
+    size = extras.process_io.write_bytes
+    if extras.disk_mb > 0:
+        return (
+            f"I/O con GUI y disco de datos: {size} B; "
+            "no se puede atribuir solo al anfitrión"
+        )
+    return (
+        f"I/O del anfitrión con GUI: {size} B; "
+        "QEMU no tiene ningún dispositivo de bloque abierto"
+    )
+
+
+def _process_io_lines(
+    io: ProcessIO | None, image_mode: bool, disk_mb: int
+) -> list[str]:
     """Sección de I/O: contadores crudos y la lectura que autoriza el veredicto."""
     if io is None:
         return [
@@ -393,10 +413,10 @@ def _process_io_lines(io: ProcessIO | None, image_mode: bool) -> list[str]:
         f"   write_bytes: {io.write_bytes} B",
     ]
     if image_mode and io.write_bytes > 0:
-        lines.append(
-            f"   I/O del anfitrión con GUI: {io.write_bytes} B; "
-            "QEMU no tiene ningún dispositivo de bloque abierto"
+        extras = SessionExtras(
+            image_mode=True, disk_mb=disk_mb, process_io=io
         )
+        lines.append("   " + _guest_io_note(extras))
     elif image_mode:
         lines.append(
             "   Sin escrituras a bloque detectadas en esta sesión con ventana."
@@ -563,6 +583,7 @@ def _extras_to_dict(extras: SessionExtras) -> dict[str, object]:
         "closure": extras.closure,
         "killed_after": extras.killed_after,
         "image_mode": extras.image_mode,
+        "disk_mb": extras.disk_mb,
         "process_io": (
             asdict(extras.process_io) if extras.process_io is not None else None
         ),
@@ -594,6 +615,11 @@ def _extras_from_dict(raw: object, path: Path) -> SessionExtras:
         raise ValueError(
             f"El campo 'image_mode' de la sesión {path} debe ser verdadero o falso."
         )
+    disk_mb = raw.get("disk_mb", 0)
+    if not isinstance(disk_mb, int) or isinstance(disk_mb, bool) or disk_mb < 0:
+        raise ValueError(
+            f"El campo 'disk_mb' de la sesión {path} debe ser un entero no negativo."
+        )
 
     process_io = _process_io_from_dict(raw.get("process_io"), path)
     wipe = _wipe_from_dict(raw.get("wipe"), path)
@@ -602,6 +628,7 @@ def _extras_from_dict(raw: object, path: Path) -> SessionExtras:
         killed_after=float(killed_after) if killed_after is not None else None,
         wipe=wipe,
         image_mode=image_mode,
+        disk_mb=disk_mb,
         process_io=process_io,
     )
 

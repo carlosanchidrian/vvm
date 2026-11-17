@@ -450,6 +450,33 @@ def test_io_con_gui_sin_escrituras_no_es_hallazgo():
     assert _last_line(report) == CLEAN_VERDICT
 
 
+def test_io_imagen_con_disco_de_datos_no_niega_el_bloque():
+    extras = audit.SessionExtras(
+        image_mode=True, disk_mb=256, process_io=_io(868_352)
+    )
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "QEMU no tiene ningún dispositivo de bloque abierto" not in report
+    nota = (
+        "I/O con GUI y disco de datos: 868352 B; "
+        "no se puede atribuir solo al anfitrión"
+    )
+    assert nota in report
+    assert _last_line(report) == "HALLAZGOS: " + nota
+
+
+def test_io_imagen_sin_disco_mantiene_la_frase_de_la_especificacion():
+    extras = audit.SessionExtras(image_mode=True, disk_mb=0, process_io=_io(4096))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert (
+        "I/O del anfitrión con GUI: 4096 B; "
+        "QEMU no tiene ningún dispositivo de bloque abierto"
+    ) in report
+
+
 def test_io_kernel_write_bytes_cero_es_el_testigo():
     extras = audit.SessionExtras(image_mode=False, process_io=_io(0))
 
@@ -513,6 +540,7 @@ def test_save_load_conserva_los_extras(tmp_path: Path):
         killed_after=None,
         wipe=audit.WipeInfo(requested=True, disk_mb=8, seconds=0.01),
         image_mode=True,
+        disk_mb=256,
         process_io=ProcessIO(1, 2, 3, 4),
     )
 
