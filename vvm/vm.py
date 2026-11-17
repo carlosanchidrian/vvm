@@ -286,9 +286,19 @@ class SignalGuard:
         self._installed = True
 
     def attach(self, proc: subprocess.Popen) -> None:
-        """Asocia el hijo y reenvía una señal que llegara antes de `Popen`."""
+        """Asocia el hijo y materializa una señal que llegara antes de `Popen`.
+
+        Con una sola señal se reenvía SIGTERM; si ya habían llegado dos, el
+        SIGKILL pendiente se envía aquí y se anota el tiempo desde la primera.
+        """
         self._proc = proc
-        if self.interrupts:
+        if not self.interrupts:
+            return
+        if self.force_killed:
+            if self.killed_after is None:
+                self.killed_after = self.elapsed_since_first()
+            _send_signal(proc, signal.SIGKILL)
+        else:
             _send_signal(proc, signal.SIGTERM)
 
     def record_kill(self, seconds: float | None) -> None:
@@ -312,15 +322,18 @@ class SignalGuard:
         self._installed = False
 
     def _handle(self, signum: int, _frame: object) -> None:
-        now = time.monotonic()
         if not self.interrupts:
             self.interrupts.append(signum)
-            self.first_signal_at = now
+            self.first_signal_at = time.monotonic()
             _send_signal(self._proc, signal.SIGTERM)
             return
         self.force_killed = True
+        if self._proc is None:
+            # Sin hijo asociado no se ha enviado ningún SIGKILL todavía: lo
+            # materializa `attach()`, que además anota el tiempo real.
+            return
         if self.killed_after is None:
-            self.killed_after = now - (self.first_signal_at or now)
+            self.killed_after = self.elapsed_since_first()
         _send_signal(self._proc, signal.SIGKILL)
 
 
@@ -414,8 +427,6 @@ def run_session(
                 _send_signal(proc, signal.SIGKILL)
                 _reap_bounded(proc)
                 guard.record_kill(guard.elapsed_since_first())
-        elif guard.force_killed:
-            guard.record_kill(guard.elapsed_since_first())
 
         return RunOutcome(
             returncode=128 + interrupt,

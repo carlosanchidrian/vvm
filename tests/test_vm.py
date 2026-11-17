@@ -487,3 +487,28 @@ def test_run_session_restores_handlers_when_the_guard_is_its_own():
 
     assert outcome.returncode == 0
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_signal_guard_kill_pending_before_attach_is_sent_on_attach():
+    guard = SignalGuard()
+    guard.install()
+    proc = None
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+        # Sin hijo asociado no se ha enviado nada ni se miente con el tiempo.
+        assert guard.force_killed is True
+        assert guard.killed_after is None
+
+        proc = subprocess.Popen(["/bin/sleep", "30"])
+        guard.attach(proc)
+
+        assert guard.killed_after is not None
+        proc.wait(timeout=5)
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        guard.restore()

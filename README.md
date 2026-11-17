@@ -176,5 +176,5 @@ vvm/
 ├── audit.py        # snapshots, informe y sesión en JSON
 ├── cli.py          # argparse: check | run | audit
 └── __main__.py     # python3 -m vvm
-tests/              # 183 tests, sin KVM
+tests/              # 187 tests, sin KVM
 ```
