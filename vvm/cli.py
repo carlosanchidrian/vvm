@@ -202,9 +202,10 @@ def _boot_source_error(args: argparse.Namespace) -> str | None:
     if args.image and args.headless:
         return (
             "--image con --headless no está soportado.\n"
-            "El cargador del ISO pinta su menú en la consola VGA y con "
-            "-display none la sesión se queda parada ahí.\n"
-            "El modo sin ventana es solo para --kernel/--initrd."
+            "[vvm] --image necesita pantalla: el cargador del ISO pinta su "
+            "menú en la consola VGA y con -display none la sesión se queda "
+            "parada ahí.\n"
+            "[vvm] El modo sin ventana es solo para --kernel/--initrd."
         )
     if not args.image:
         if args.kernel and not args.initrd:

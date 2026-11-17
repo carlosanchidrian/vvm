@@ -300,6 +300,11 @@ def run_session(
                 _send_signal(proc, signal.SIGKILL)
                 proc.wait()
                 killed_after = wait_seconds
+            except KeyboardInterrupt:
+                force_killed[0] = True
+                _send_signal(proc, signal.SIGKILL)
+                proc.wait()
+                killed_after = 0.0
             else:
                 if force_killed[0]:
                     killed_after = 0.0
