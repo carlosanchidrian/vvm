@@ -108,6 +108,11 @@ Detalles:
   construirlo. Si ya no consta cómo cerró la sesión (por ejemplo, un fallo
   antes de lanzar QEMU o una sesión antigua), el informe dice
   `Cierre: desconocido`.
+- Ventana del cierre: si la señal llega **después** de construir el informe
+  (mientras se escribe el fichero o se guarda la sesión), el informe puede
+  declarar el cierre anterior —normal o la señal previa— porque ya estaba
+  compuesto; el código de salida sigue siendo `128+señal`. El fichero es una
+  foto del cierre, no una promesa sobre los últimos milisegundos.
 - Para salir de una sesión interactiva: **Ctrl-A x**.
 
 ### `vvm audit` — informe de una sesión
@@ -176,5 +181,5 @@ vvm/
 ├── audit.py        # snapshots, informe y sesión en JSON
 ├── cli.py          # argparse: check | run | audit
 └── __main__.py     # python3 -m vvm
-tests/              # 187 tests, sin KVM
+tests/              # 191 tests, sin KVM
 ```
