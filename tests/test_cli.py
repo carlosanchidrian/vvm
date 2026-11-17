@@ -270,6 +270,7 @@ def test_run_con_qemu_true_emite_informe_y_guarda_sesion(
     saved = audit.load_session_full(session)
     assert len(saved.checks or ()) == 10
     assert saved.forced is False
+    assert saved.extras.closure == "normal"
 
 
 def test_run_cierra_el_disco_antes_de_la_instantanea_final(

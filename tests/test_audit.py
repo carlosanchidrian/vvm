@@ -582,14 +582,28 @@ def test_save_load_conserva_los_extras(tmp_path: Path):
     assert audit.load_session_full(path).extras == extras
 
 
-def test_sesion_antigua_sin_extras_usa_los_defectos(tmp_path: Path):
+def test_sesion_antigua_sin_extras_declara_cierre_desconocido(tmp_path: Path):
     path = tmp_path / "antigua.json"
     path.write_text(
         json.dumps({"before": asdict(_snapshot()), "after": asdict(_snapshot())}),
         encoding="utf-8",
     )
 
-    assert audit.load_session_full(path).extras == audit.SessionExtras()
+    session = audit.load_session_full(path)
+
+    assert session.extras == audit.SessionExtras()
+    assert session.extras.closure is None
+    report = audit.build_report(session.before, session.after, extras=session.extras)
+    assert "Cierre: desconocido" in report
+    assert "Cierre: normal" not in report
+
+
+def test_cierre_normal_solo_cuando_se_midio():
+    extras = audit.SessionExtras(closure="normal")
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "Cierre: normal" in report
 
 
 def test_sesion_antigua_sin_memfds_dice_no_medido(tmp_path: Path):

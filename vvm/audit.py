@@ -63,9 +63,13 @@ class WipeInfo:
 
 @dataclass(frozen=True)
 class SessionExtras:
-    """Datos del cierre que acompañan a los snapshots."""
+    """Datos del cierre que acompañan a los snapshots.
 
-    closure: str = "normal"
+    `closure=None` significa que el CLI no midió el cierre (sesión antigua o
+    fallo antes de lanzar QEMU): el informe lo declara como desconocido.
+    """
+
+    closure: str | None = None
     killed_after: float | None = None
     wipe: WipeInfo | None = None
     image_mode: bool = False
@@ -348,7 +352,7 @@ def build_report(
         *_log_lines(log_path),
         "",
         "6. Cierre y borrado",
-        f"   Cierre: {details.closure}",
+        f"   Cierre: {details.closure or 'desconocido'}",
         *_teardown_lines(details),
         "",
         "7. Fuera del alcance de este informe",
@@ -605,10 +609,11 @@ def _extras_from_dict(raw: object, path: Path) -> SessionExtras:
     if not isinstance(raw, dict):
         raise ValueError(f"El campo 'extras' de la sesión {path} debe ser un objeto.")
 
-    closure = raw.get("closure", "normal")
-    if not isinstance(closure, str) or not closure:
+    closure = raw.get("closure")
+    if closure is not None and (not isinstance(closure, str) or not closure):
         raise ValueError(
-            f"El campo 'closure' de la sesión {path} debe ser una cadena no vacía."
+            f"El campo 'closure' de la sesión {path} debe ser una cadena no "
+            "vacía o null."
         )
     killed_after = raw.get("killed_after")
     if killed_after is not None and (
