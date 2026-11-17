@@ -381,6 +381,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 after = before
+            report_text = audit.build_report(
+                before,
+                after,
+                None if args.image else args.log,
+                checks=tuple(results),
+                forced=args.force,
+                extras=extras,
+            )
+            _emit_report(report_text, args.report)
             try:
                 audit.save_session(
                     audit.default_session_path(),
@@ -392,17 +401,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
             except (OSError, RuntimeError) as exc:
                 print(f"Aviso: no se pudo guardar la sesión: {exc}", file=sys.stderr)
-            _emit_report(
-                audit.build_report(
-                    before,
-                    after,
-                    None if args.image else args.log,
-                    checks=tuple(results),
-                    forced=args.force,
-                    extras=extras,
-                ),
-                args.report,
-            )
         return exit_code
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
