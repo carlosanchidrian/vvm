@@ -24,6 +24,7 @@ SHM_PATH = Path("/dev/shm")
 PROC_PATH = Path("/proc")
 
 _QEMU_PREFIX = "qemu-system-"
+_MEMFD_PREFIX = "/memfd:"
 _SESSION_MARKER_BYTES = SESSION_MARKER.encode()
 
 # Memfds que crea el escritorio (pantalla, cursor y audio). Se comparan con la
@@ -94,7 +95,9 @@ def list_memfd_names(proc_dir: Path = PROC_PATH) -> tuple[str, ...]:
     """Nombres `memfd:*` visibles en los descriptores abiertos de `/proc`.
 
     Se leen enlaces de `/proc/<pid>/fd` (no se abre ni se toca ningún memfd) y
-    se normaliza el sufijo ` (deleted)` que añade el kernel.
+    se normaliza el sufijo ` (deleted)` que añade el kernel. Solo cuentan los
+    destinos que **empiezan** por `/memfd:`: un fichero regular llamado
+    `memfd:algo` no es un memfd anónimo.
     """
     names: set[str] = set()
     try:
@@ -109,9 +112,10 @@ def list_memfd_names(proc_dir: Path = PROC_PATH) -> tuple[str, ...]:
                                 target = os.readlink(fd_entry.path)
                             except OSError:
                                 continue
-                            if "/memfd:" in target:
-                                raw = target.split("/memfd:", 1)[1]
-                                names.add("memfd:" + raw.split(" (deleted)", 1)[0])
+                            if not target.startswith(_MEMFD_PREFIX):
+                                continue
+                            raw = target[len(_MEMFD_PREFIX):]
+                            names.add("memfd:" + raw.split(" (deleted)", 1)[0])
                 except OSError:
                     continue
     except OSError as exc:

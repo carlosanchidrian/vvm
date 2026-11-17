@@ -370,6 +370,18 @@ def test_list_memfd_names_lee_enlaces_y_normaliza_deleted(tmp_path: Path):
     )
 
 
+def test_list_memfd_names_ignora_ficheros_regulares_con_memfd_en_el_nombre(
+    tmp_path: Path,
+):
+    regular = tmp_path / "memfd:regular"
+    regular.write_bytes(b"")
+    _fake_memfd(tmp_path, "100", "3", str(regular))
+    _fake_memfd(tmp_path, "100", "4", f"{regular} (deleted)")
+    _fake_memfd(tmp_path, "100", "5", "/memfd:displaysurface")
+
+    assert audit.list_memfd_names(tmp_path) == ("memfd:displaysurface",)
+
+
 def test_memfds_de_la_pila_del_anfitrion_no_son_hallazgo():
     before = _snapshot()
     after = _snapshot(
