@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -65,6 +70,53 @@ def _capture_disk_fd(monkeypatch: pytest.MonkeyPatch, fds: list[int]) -> None:
 def _stub_session(monkeypatch: pytest.MonkeyPatch, session: Path) -> None:
     monkeypatch.setattr(cli.audit, "default_session_path", lambda: session)
     monkeypatch.setattr(cli.audit, "take_snapshot", lambda: _snapshot())
+
+
+def _fake_qemu(tmp_path: Path, body: str) -> Path:
+    script = tmp_path / "fake-qemu"
+    script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+def _wait_for(path: Path, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"no apareció {path}")
+        time.sleep(0.02)
+
+
+def _cli_env(tmp_path: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")
+    return env
+
+
+def _cli_run_command(
+    tmp_path: Path,
+    kernel: Path,
+    initrd: Path,
+    qemu: Path,
+    report: Path,
+    *extra: str,
+) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "vvm",
+        "run",
+        "--kernel",
+        str(kernel),
+        "--initrd",
+        str(initrd),
+        "--qemu",
+        str(qemu),
+        "--force",
+        "--report",
+        str(report),
+        *extra,
+    ]
 
 
 # --- check ---------------------------------------------------------------
@@ -165,7 +217,7 @@ def test_run_dry_run_imprime_linea_y_no_lanza(host_ok, monkeypatch, tmp_path, ca
         raise AssertionError("no debe ejecutarse en --dry-run")
 
     monkeypatch.setattr(cli.host_check, "check_host", boom)
-    monkeypatch.setattr(cli.vm, "run_vm", boom)
+    monkeypatch.setattr(cli.vm, "run_session", boom)
 
     assert cli.main(_run_args(kernel, initrd, "--dry-run")) == 0
 
@@ -187,7 +239,7 @@ def test_run_con_bloqueo_aborta_y_cierra_fd(host_ok, monkeypatch, tmp_path, caps
     def boom(*args, **kwargs):
         raise AssertionError("no debe lanzarse QEMU si hay bloqueos")
 
-    monkeypatch.setattr(cli.vm, "run_vm", boom)
+    monkeypatch.setattr(cli.vm, "run_session", boom)
 
     assert cli.main(_run_args(kernel, initrd)) == 1
 
@@ -293,10 +345,10 @@ def test_run_emite_informe_si_se_interrumpe(host_ok, monkeypatch, tmp_path, caps
     session = tmp_path / "sesion.json"
     _stub_session(monkeypatch, session)
 
-    def interrupted(cmd, pass_fds=()):
+    def interrupted(cmd, pass_fds=(), **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.vm, "run_vm", interrupted)
+    monkeypatch.setattr(cli.vm, "run_session", interrupted)
 
     assert cli.main(_run_args(kernel, initrd)) == 130
 
@@ -310,7 +362,11 @@ def test_run_force_ignora_bloqueos(host_ok, monkeypatch, tmp_path, capsys):
     session = tmp_path / "sesion.json"
     _stub_session(monkeypatch, session)
     monkeypatch.setattr(host_check, "read_swaps", lambda: SWAP_ACTIVE)
-    monkeypatch.setattr(cli.vm, "run_vm", lambda cmd, pass_fds=(): 0)
+    monkeypatch.setattr(
+        cli.vm,
+        "run_session",
+        lambda cmd, pass_fds=(): cli.vm.RunOutcome(returncode=0),
+    )
 
     assert cli.main(_run_args(kernel, initrd, "--force")) == 0
 
@@ -351,7 +407,7 @@ def _forbid_launch(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*args, **kwargs):
         raise AssertionError("no debe lanzarse nada con argumentos inválidos")
 
-    monkeypatch.setattr(cli.vm, "run_vm", boom)
+    monkeypatch.setattr(cli.vm, "run_session", boom)
 
 
 def test_run_image_con_kernel_sale_2_y_no_lanza(
@@ -483,6 +539,165 @@ def test_check_image_inexistente_sale_2(tmp_path, capsys):
     assert cli.main(["check", "--image", str(missing)]) == 2
 
     assert "--image no encontrada" in capsys.readouterr().err
+
+
+# --- teardown ------------------------------------------------------------
+
+
+def test_run_wipe_con_disk_zero_declara_sin_disco(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    session = tmp_path / "sesion.json"
+    _stub_session(monkeypatch, session)
+
+    code = cli.main(
+        [
+            "run",
+            "--image",
+            str(iso),
+            "--disk",
+            "0",
+            "--wipe",
+            "--qemu",
+            "/bin/true",
+        ]
+    )
+
+    assert code == 0
+    assert "Wipe: sin disco de datos" in capsys.readouterr().out
+    assert audit.load_session_full(session).extras.wipe == audit.WipeInfo(True, 0)
+
+
+def test_run_sigterm_sale_143_y_no_deja_hijo(tmp_path):
+    kernel, initrd = _boot_files(tmp_path)
+    marker = tmp_path / "qemu.pid"
+    qemu = _fake_qemu(
+        tmp_path,
+        (
+            "sleep 0.3\n"
+            f"echo $$ > {marker}\n"
+            "trap 'exit 0' TERM\n"
+            "while :; do sleep 0.05; done\n"
+        ),
+    )
+    report = tmp_path / "informe.txt"
+    proc = subprocess.Popen(
+        _cli_run_command(
+            tmp_path, kernel, initrd, qemu, report, "--disk", "8"
+        ),
+        cwd=Path(__file__).resolve().parents[1],
+        env=_cli_env(tmp_path),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for(marker)
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+    assert proc.returncode == 143
+    assert report.is_file()
+    text = report.read_text(encoding="utf-8")
+    assert "Cierre: SIGTERM" in text
+    child = int(marker.read_text(encoding="utf-8").strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+
+
+def test_run_sigterm_ignorado_mata_con_sigkill_y_lo_declara(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    kernel, initrd = _boot_files(tmp_path)
+    session = tmp_path / "sesion.json"
+    _stub_session(monkeypatch, session)
+    marker = tmp_path / "qemu.pid"
+    qemu = _fake_qemu(
+        tmp_path,
+        (
+            "sleep 0.3\n"
+            f"echo $$ > {marker}\n"
+            "trap '' TERM\n"
+            "while :; do sleep 0.05; done\n"
+        ),
+    )
+    monkeypatch.setattr(cli.vm, "TERM_WAIT_SECONDS", 0.2)
+    delivered: list[bool] = []
+
+    def waiter() -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if marker.exists():
+                os.kill(os.getpid(), signal.SIGTERM)
+                delivered.append(True)
+                return
+            time.sleep(0.02)
+
+    thread = threading.Thread(target=waiter, daemon=True)
+    thread.start()
+    try:
+        code = cli.main(_run_args(kernel, initrd, "--qemu", str(qemu), "--disk", "8"))
+    finally:
+        thread.join(timeout=1)
+
+    assert delivered == [True]
+    assert code == 143
+    out = capsys.readouterr().out
+    assert "Cierre: SIGTERM" in out
+    assert "QEMU no atendió el SIGTERM: SIGKILL a los 0.2 s" in out
+    child = int(marker.read_text(encoding="utf-8").strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+
+
+def test_run_wipe_se_ejecuta_al_interrumpir(tmp_path):
+    kernel, initrd = _boot_files(tmp_path)
+    marker = tmp_path / "qemu.pid"
+    qemu = _fake_qemu(
+        tmp_path,
+        (
+            "sleep 0.3\n"
+            f"echo $$ > {marker}\n"
+            "trap 'exit 0' TERM\n"
+            "while :; do sleep 0.05; done\n"
+        ),
+    )
+    report = tmp_path / "informe.txt"
+    proc = subprocess.Popen(
+        _cli_run_command(
+            tmp_path,
+            kernel,
+            initrd,
+            qemu,
+            report,
+            "--disk",
+            "8",
+            "--wipe",
+        ),
+        cwd=Path(__file__).resolve().parents[1],
+        env=_cli_env(tmp_path),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for(marker)
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+    assert proc.returncode == 143
+    text = report.read_text(encoding="utf-8")
+    assert "Cierre: SIGTERM" in text
+    assert "Wipe: 8 MiB a cero en" in text
 
 
 # --- audit ---------------------------------------------------------------

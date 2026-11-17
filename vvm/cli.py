@@ -14,9 +14,10 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import sys
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from vvm import __version__, audit, host_check, images, vm
@@ -55,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--disk", type=int, default=256, metavar="MB")
     run.add_argument("--cpus", type=int, default=1)
     run.add_argument("--headless", action="store_true")
+    run.add_argument(
+        "--wipe",
+        action="store_true",
+        help="sobrescribe con ceros el disco de datos antes de cerrarlo",
+    )
     run.add_argument("--log", metavar="RUTA", help="log serie (obligatorio con --headless)")
     run.add_argument("--report", metavar="RUTA", help="escribe el informe en un fichero")
     run.add_argument("--qemu", default="qemu-system-x86_64")
@@ -214,6 +220,42 @@ def _boot_source_error(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _closure_label(interrupt: int | None) -> str:
+    """Etiqueta del cierre para el informe."""
+    if interrupt is None:
+        return "normal"
+    if interrupt == signal.SIGINT:
+        return "Ctrl-C"
+    if interrupt == signal.SIGTERM:
+        return "SIGTERM"
+    if interrupt == signal.SIGHUP:
+        return "SIGHUP"
+    return f"señal {interrupt}"
+
+
+def _wipe_disk(
+    args: argparse.Namespace,
+    disk_fd: int | None,
+) -> audit.WipeInfo:
+    """Borra el disco si hay uno; con `--disk 0` solo lo declara, no falla."""
+    if args.disk == 0 or disk_fd is None:
+        return audit.WipeInfo(requested=True, disk_mb=0)
+    try:
+        result = images.wipe_fd(disk_fd)
+    except OSError as exc:
+        print(f"Aviso: no se pudo borrar el disco: {exc}", file=sys.stderr)
+        return audit.WipeInfo(
+            requested=True,
+            disk_mb=args.disk,
+            error=str(exc),
+        )
+    return audit.WipeInfo(
+        requested=True,
+        disk_mb=args.disk,
+        seconds=result.seconds,
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     error = _boot_source_error(args)
     if error is not None:
@@ -294,25 +336,41 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
 
         before = audit.take_snapshot()
+        extras = audit.SessionExtras(image_mode=bool(args.image))
         exit_code = 0
         try:
             pass_fds = [
                 fd for fd in (disk_fd, image_fd) if fd is not None
             ]
-            exit_code = vm.run_vm(cmd, pass_fds=pass_fds)
+            outcome = vm.run_session(cmd, pass_fds=pass_fds)
+            exit_code = outcome.returncode
+            extras = audit.SessionExtras(
+                closure=_closure_label(outcome.interrupt),
+                killed_after=outcome.killed_after,
+                image_mode=bool(args.image),
+                process_io=outcome.process_io,
+            )
         except KeyboardInterrupt:
             exit_code = 130
+            extras = audit.SessionExtras(
+                closure="Ctrl-C",
+                image_mode=bool(args.image),
+            )
             print(
                 "Sesión interrumpida; se emite el informe igualmente.",
                 file=sys.stderr,
             )
         finally:
-            # El informe sale pase lo que pase: salida normal, Ctrl-C o error de QEMU.
-            # Cerrar los medios antes de medir: si no, Shmem incluye lo que el
-            # guest escribió y el «después» nunca vuelve a la línea base. El
-            # finally exterior queda como red de seguridad si algo falla antes.
+            # El informe sale pase lo que pase: salida normal, Ctrl-C o señal.
+            # Orden deliberado: cerrar el ISO, borrar el disco si se pidió,
+            # cerrar el disco y solo entonces medir. Si el disco siguiera
+            # abierto, Shmem incluiría lo que el guest escribió y el «después»
+            # nunca volvería a la línea base. El finally exterior queda como
+            # red de seguridad si algo falla antes.
             _close_fd(image_fd)
             image_fd = None
+            if args.wipe:
+                extras = replace(extras, wipe=_wipe_disk(args, disk_fd))
             _close_fd(disk_fd)
             disk_fd = None
             try:
@@ -330,6 +388,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     after,
                     checks=tuple(results),
                     forced=args.force,
+                    extras=extras,
                 )
             except (OSError, RuntimeError) as exc:
                 print(f"Aviso: no se pudo guardar la sesión: {exc}", file=sys.stderr)
@@ -340,6 +399,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     None if args.image else args.log,
                     checks=tuple(results),
                     forced=args.force,
+                    extras=extras,
                 ),
                 args.report,
             )
@@ -371,6 +431,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
             session.after,
             checks=session.checks,
             forced=session.forced,
+            extras=session.extras,
         )
     )
     return 0
