@@ -197,10 +197,29 @@ def _find_token(cmd: Sequence[str], needle: str) -> str | None:
 _FD_DISK = re.compile(r"file=/dev/fd/\d+")
 
 
-def _find_fd_disk(cmd: Sequence[str]) -> str | None:
-    """Token que pasa el disco como descriptor heredado (`file=/dev/fd/N`)."""
-    for token in cmd:
-        if _FD_DISK.search(token):
+def _drive_tokens(cmd: Sequence[str]) -> list[str]:
+    """Valores de los `-drive` de la línea de QEMU."""
+    return [
+        cmd[index + 1]
+        for index, token in enumerate(cmd)
+        if token == "-drive" and index + 1 < len(cmd)
+    ]
+
+
+def _find_cdrom_drive(cmd: Sequence[str]) -> str | None:
+    """Token `-drive` del medio óptico (el ISO, en modo imagen)."""
+    for token in _drive_tokens(cmd):
+        if "media=cdrom" in token:
+            return token
+    return None
+
+
+def _find_data_drive(cmd: Sequence[str]) -> str | None:
+    """Token `-drive` del disco de datos: el virtio, nunca el cdrom del ISO."""
+    for token in _drive_tokens(cmd):
+        if "media=cdrom" in token:
+            continue
+        if "if=virtio" in token:
             return token
     return None
 
@@ -310,18 +329,34 @@ def _check_p8() -> CheckResult:
 
 
 def _check_p9(cmd: Sequence[str], disk_mb: int) -> CheckResult:
+    """Anonimato del backend y del disco de datos.
+
+    En modo imagen el primer `file=/dev/fd/N` de la línea es el cdrom del ISO,
+    no el disco de datos: el disco se localiza por `if=virtio`. Si `--disk 0`
+    no hay disco de datos que comprobar y se dice explícitamente.
+    """
     share = _find_token(cmd, "share=off")
-    fd_disk = _find_fd_disk(cmd)
-    evidence = (
-        f"share=off: {share or 'ausente'}; "
-        f"disco por fd: {fd_disk or 'ausente'}"
-    )
-    if share is None:
-        return _result(_P9, "FAIL", evidence)
-    if disk_mb == 0 and fd_disk is None:
-        return _result(_P9, "OK", evidence + "; sin disco de datos")
-    status: Status = "OK" if fd_disk is not None else "FAIL"
-    return _result(_P9, status, evidence)
+    parts = [f"share=off: {share or 'ausente'}"]
+
+    cdrom = _find_cdrom_drive(cmd)
+    if cdrom is not None and _FD_DISK.search(cdrom):
+        parts.append(f"cdrom por fd: {cdrom}")
+
+    if disk_mb == 0:
+        parts.append("sin disco de datos")
+        status: Status = "OK" if share is not None else "FAIL"
+        return _result(_P9, status, "; ".join(parts))
+
+    drive = _find_data_drive(cmd)
+    by_fd = drive is not None and _FD_DISK.search(drive) is not None
+    if by_fd:
+        parts.append(f"disco por fd: {drive}")
+    elif drive is None:
+        parts.append("disco por fd: ausente")
+    else:
+        parts.append(f"disco por fd: ausente (disco de datos por ruta: {drive})")
+    status = "OK" if share is not None and by_fd else "FAIL"
+    return _result(_P9, status, "; ".join(parts))
 
 
 def _check_p10() -> CheckResult:

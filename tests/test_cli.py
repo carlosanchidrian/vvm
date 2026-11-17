@@ -56,6 +56,14 @@ def _snapshot(**overrides) -> audit.Snapshot:
     return audit.Snapshot(**data)
 
 
+def _is_open(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True
+
+
 def _capture_disk_fd(monkeypatch: pytest.MonkeyPatch, fds: list[int]) -> None:
     real = images.create_disk_fd
 
@@ -210,36 +218,32 @@ def test_version(capsys):
 
 def test_run_dry_run_imprime_linea_y_no_lanza(host_ok, monkeypatch, tmp_path, capsys):
     kernel, initrd = _boot_files(tmp_path)
-    fds: list[int] = []
-    _capture_disk_fd(monkeypatch, fds)
 
     def boom(*args, **kwargs):
         raise AssertionError("no debe ejecutarse en --dry-run")
 
     monkeypatch.setattr(cli.host_check, "check_host", boom)
     monkeypatch.setattr(cli.vm, "run_session", boom)
+    monkeypatch.setattr(cli.images, "create_disk_fd", boom)
+    monkeypatch.setattr(cli.images, "create_image_fd", boom)
 
     assert cli.main(_run_args(kernel, initrd, "--dry-run")) == 0
 
     out = capsys.readouterr().out
     assert "memory-backend-memfd,id=mem,size=512M,share=off" in out
-    assert "file=/dev/fd/" in out
+    assert "file=/dev/fd/<fd>,format=raw,if=virtio,cache=writethrough" in out
     assert "-nic none" in out
-    assert fds, "el disco debe crearse en memoria"
-    with pytest.raises(OSError):
-        os.fstat(fds[0])
 
 
-def test_run_con_bloqueo_aborta_y_cierra_fd(host_ok, monkeypatch, tmp_path, capsys):
+def test_run_con_bloqueo_aborta_sin_crear_fds(host_ok, monkeypatch, tmp_path, capsys):
     kernel, initrd = _boot_files(tmp_path)
     monkeypatch.setattr(host_check, "read_swaps", lambda: SWAP_ACTIVE)
-    fds: list[int] = []
-    _capture_disk_fd(monkeypatch, fds)
 
     def boom(*args, **kwargs):
         raise AssertionError("no debe lanzarse QEMU si hay bloqueos")
 
     monkeypatch.setattr(cli.vm, "run_session", boom)
+    monkeypatch.setattr(cli.images, "create_disk_fd", boom)
 
     assert cli.main(_run_args(kernel, initrd)) == 1
 
@@ -247,8 +251,6 @@ def test_run_con_bloqueo_aborta_y_cierra_fd(host_ok, monkeypatch, tmp_path, caps
     assert "[FALLA]" in captured.out
     assert "Sin swap activa:" in captured.out
     assert "--force" in captured.err
-    with pytest.raises(OSError):
-        os.fstat(fds[0])
 
 
 def test_run_con_qemu_true_emite_informe_y_guarda_sesion(
@@ -443,7 +445,51 @@ def test_run_image_con_headless_sale_2_y_no_lanza(
 
     err = capsys.readouterr().err
     assert "--image con --headless no está soportado" in err
+    assert "medido: 1 MB leído, 0 B de log" in err
     assert "solo para --kernel/--initrd" in err
+
+
+def test_run_image_con_log_sale_2_y_no_lanza(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    log = tmp_path / "serie.log"
+    _forbid_launch(monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("no debe copiarse el ISO si --log no aplica")
+
+    monkeypatch.setattr(cli.images, "create_image_fd", boom)
+
+    assert cli.main(["run", "--image", str(iso), "--log", str(log)]) == 2
+
+    err = capsys.readouterr().err
+    assert "--image y --log son excluyentes" in err
+    assert not log.exists()
+
+
+@pytest.mark.parametrize("modo", ["image", "kernel"])
+def test_run_cpus_cero_sale_2_sin_copiar(
+    host_ok, monkeypatch, tmp_path, capsys, modo
+):
+    iso = _image(tmp_path)
+    kernel, initrd = _boot_files(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("--cpus 0 no debe llegar a crear medios ni lanzar")
+
+    monkeypatch.setattr(cli.images, "create_image_fd", boom)
+    monkeypatch.setattr(cli.images, "create_disk_fd", boom)
+    _forbid_launch(monkeypatch)
+
+    if modo == "image":
+        args = ["run", "--image", str(iso), "--cpus", "0"]
+    else:
+        args = _run_args(kernel, initrd, "--cpus", "0")
+
+    assert cli.main(args) == 2
+
+    assert "--cpus debe ser mayor que cero" in capsys.readouterr().err
 
 
 def test_run_kernel_sin_initrd_sale_2_y_no_lanza(
@@ -473,19 +519,134 @@ def test_run_image_dry_run_imprime_fd_y_no_lee_el_iso(
 ):
     iso = _image(tmp_path)
 
-    def boom(path):
-        raise AssertionError("--dry-run no debe copiar el ISO")
+    def boom(*args, **kwargs):
+        raise AssertionError("--dry-run no debe copiar el ISO ni crear el disco")
 
     monkeypatch.setattr(cli.images, "create_image_fd", boom)
+    monkeypatch.setattr(cli.images, "create_disk_fd", boom)
     _forbid_launch(monkeypatch)
 
     assert cli.main(["run", "--image", str(iso), "--dry-run"]) == 0
 
     out = capsys.readouterr().out
     assert "file=/dev/fd/<fd>,format=raw,media=cdrom,readonly=on" in out
+    assert "file=/dev/fd/<fd>,format=raw,if=virtio,cache=writethrough" in out
     assert "-boot d" in out
     assert "-display gtk" in out
     assert "-kernel" not in out
+
+
+def test_run_image_con_bloqueo_no_copia_el_iso(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    monkeypatch.setattr(host_check, "read_swaps", lambda: SWAP_ACTIVE)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("no debe copiarse el ISO si el pre-chequeo bloquea")
+
+    monkeypatch.setattr(cli.images, "create_image_fd", boom)
+    _forbid_launch(monkeypatch)
+
+    assert cli.main(["run", "--image", str(iso)]) == 1
+
+    captured = capsys.readouterr()
+    assert "[FALLA]" in captured.out
+    assert "--force" in captured.err
+
+
+def test_run_image_prechequeo_y_linea_base_van_antes_de_copiar(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    session = tmp_path / "sesion.json"
+    monkeypatch.setattr(cli.audit, "default_session_path", lambda: session)
+    real_check = host_check.check_host
+    real_copy = images.create_image_fd
+    events: list[str] = []
+
+    def check(*args, **kwargs):
+        events.append("precheck")
+        return real_check(*args, **kwargs)
+
+    monkeypatch.setattr(cli.host_check, "check_host", check)
+
+    def snapshot():
+        events.append("snapshot")
+        return _snapshot()
+
+    monkeypatch.setattr(cli.audit, "take_snapshot", snapshot)
+
+    def copy(path):
+        events.append("copy")
+        return real_copy(path)
+
+    monkeypatch.setattr(cli.images, "create_image_fd", copy)
+    monkeypatch.setattr(
+        cli.vm, "run_session", lambda cmd, pass_fds=(): cli.vm.RunOutcome(0)
+    )
+
+    assert cli.main(["run", "--image", str(iso), "--disk", "0"]) == 0
+
+    assert events == ["precheck", "snapshot", "copy", "snapshot"]
+
+
+def test_run_image_shmem_no_descuenta_el_iso(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    session = tmp_path / "sesion.json"
+    monkeypatch.setattr(cli.audit, "default_session_path", lambda: session)
+    iso_kb = 3 * 1024
+    image_fds: list[int] = []
+    real_copy = images.create_image_fd
+
+    def capture_copy(path):
+        fd = real_copy(path)
+        image_fds.append(fd)
+        return fd
+
+    monkeypatch.setattr(cli.images, "create_image_fd", capture_copy)
+
+    def snapshot():
+        # El memfd del ISO suma a Shmem mientras está abierto: si la línea base
+        # se tomara después de copiarlo, su delta saldría negativo.
+        abierto = bool(image_fds) and _is_open(image_fds[-1])
+        return _snapshot(shmem_kb=100_000 + (iso_kb if abierto else 0))
+
+    monkeypatch.setattr(cli.audit, "take_snapshot", snapshot)
+    monkeypatch.setattr(
+        cli.vm, "run_session", lambda cmd, pass_fds=(): cli.vm.RunOutcome(0)
+    )
+
+    assert cli.main(["run", "--image", str(iso), "--disk", "0"]) == 0
+
+    before, after = audit.load_session(session)
+    assert before.shmem_kb == 100_000
+    assert after.shmem_kb == 100_000
+    out = capsys.readouterr().out
+    assert "delta +0 kB" in out
+    assert "-3072" not in out
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["--mem", "0"], ["--disk", "-1"]],
+)
+def test_run_image_con_argumento_invalido_no_copia_el_iso(
+    host_ok, monkeypatch, tmp_path, capsys, extra
+):
+    iso = _image(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("no debe copiarse el ISO con argumentos inválidos")
+
+    monkeypatch.setattr(cli.images, "create_image_fd", boom)
+    _forbid_launch(monkeypatch)
+
+    assert cli.main(["run", "--image", str(iso), *extra]) == 2
+
+    assert "Error:" in capsys.readouterr().err
 
 
 def test_run_image_disk_zero_no_crea_disco_de_datos(

@@ -3,9 +3,13 @@
 `main()` es la única puerta de entrada: devuelve el código de salida y no llama
 a `sys.exit()` (eso lo hace `__main__.py`).
 
-Orden de `run`, deliberado: crear el fd del disco (inocuo) → construir la línea
-de QEMU → pre-chequeo. P7 y P9 inspeccionan esa línea, así que el fd y la línea
-tienen que existir antes del chequeo. Si algo bloquea, se cierra el fd y se sale.
+Orden de `run`, deliberado: validar la fuente de arranque y el tamaño del ISO
+(solo `stat`) → pre-chequeo con una línea de descriptores simulados → línea base
+→ crear/copiar los medios → línea real con los fds. P7 y P9 solo inspeccionan la
+forma de la línea, así que el pre-chequeo puede ejecutarse antes de que exista
+ningún descriptor: así P2 mide la memoria que hay de verdad y el ISO no se copia
+si el anfitrión no es apto. La línea base se toma antes de crear los medios para
+que el delta de Shmem no descuente el propio ISO de la herramienta.
 """
 
 from __future__ import annotations
@@ -61,7 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="sobrescribe con ceros el disco de datos antes de cerrarlo",
     )
-    run.add_argument("--log", metavar="RUTA", help="log serie (obligatorio con --headless)")
+    run.add_argument(
+        "--log",
+        metavar="RUTA",
+        help="log serie (solo --kernel/--initrd, obligatorio con --headless)",
+    )
     run.add_argument("--report", metavar="RUTA", help="escribe el informe en un fichero")
     run.add_argument("--qemu", default="qemu-system-x86_64")
     run.add_argument(
@@ -196,7 +204,11 @@ def _emit_report(report: str, report_path: str | None) -> None:
 
 
 def _boot_source_error(args: argparse.Namespace) -> str | None:
-    """Valida la fuente de arranque; devuelve el mensaje de error o None."""
+    """Valida la fuente de arranque; devuelve el mensaje de error o None.
+
+    Todo lo que se puede rechazar sin tocar la memoria se rechaza aquí, antes de
+    validar ficheros y de copiar el ISO (salida 2 en los dos modos).
+    """
     if args.image and (args.kernel or args.initrd):
         return "--image y --kernel/--initrd son excluyentes"
     if args.image and args.headless:
@@ -204,8 +216,15 @@ def _boot_source_error(args: argparse.Namespace) -> str | None:
             "--image con --headless no está soportado.\n"
             "[vvm] --image necesita pantalla: el cargador del ISO pinta su "
             "menú en la consola VGA y con -display none la sesión se queda "
-            "parada ahí.\n"
+            "parada ahí (medido: 1 MB leído, 0 B de log).\n"
             "[vvm] El modo sin ventana es solo para --kernel/--initrd."
+        )
+    if args.image and args.log:
+        return (
+            "--image y --log son excluyentes.\n"
+            "El live se pilota en la ventana (-display gtk) y la consola del "
+            "guest va a la VGA: no hay consola serie que guardar.\n"
+            "El log serie es solo para --kernel/--initrd con --headless."
         )
     if not args.image:
         if args.kernel and not args.initrd:
@@ -218,6 +237,8 @@ def _boot_source_error(args: argparse.Namespace) -> str | None:
         return f"--mem debe ser mayor que cero: {args.mem} MB"
     if args.disk < 0:
         return f"--disk no puede ser negativo: {args.disk} MB"
+    if args.cpus <= 0:
+        return f"--cpus debe ser mayor que cero: {args.cpus}"
     return None
 
 
@@ -263,6 +284,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Error: {error}", file=sys.stderr)
         return 2
 
+    # 1. Validación barata: fuente de arranque y tamaño del ISO (solo `stat`).
     image_mb = 0
     try:
         if args.image:
@@ -273,71 +295,88 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2 if args.image else 1
 
-    disk_fd: int | None = None
-    image_fd: int | None = None
-    try:
-        # Los fds se crean antes de la línea (P9 la inspecciona) y son inocuos:
-        # solo reservan memoria, no escriben en disco.
-        if args.disk > 0:
-            disk_fd = images.create_disk_fd(args.disk)
-        if args.image and not args.dry_run:
-            image_fd = images.create_image_fd(args.image)
+    config = vm.VmConfig(
+        kernel=args.kernel,
+        initrd=args.initrd,
+        image=args.image,
+        mem_mb=args.mem,
+        disk_mb=args.disk,
+        cpus=args.cpus,
+        headless=args.headless,
+        serial_log=args.log,
+    )
+
+    # 2. `--dry-run`: línea con descriptores simbólicos. No se crea ningún fd ni
+    # se lee el ISO.
+    if args.dry_run:
         try:
             cmd = vm.build_cmd(
-                vm.VmConfig(
-                    kernel=args.kernel,
-                    initrd=args.initrd,
-                    image=args.image,
-                    mem_mb=args.mem,
-                    disk_mb=args.disk,
-                    cpus=args.cpus,
-                    headless=args.headless,
-                    serial_log=args.log,
-                ),
-                disk_fd,
+                config,
+                _PLACEHOLDER_FD if args.disk > 0 else None,
                 qemu=args.qemu,
-                image_fd=(
-                    image_fd
-                    if image_fd is not None
-                    else (_PLACEHOLDER_FD if args.image else None)
-                ),
+                image_fd=_PLACEHOLDER_FD if args.image else None,
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 2 if args.image else 1
+        print(shlex.join(cmd))
+        return 0
 
-        if args.dry_run:
-            print(shlex.join(cmd))
-            return 0
-
-        results = host_check.check_host(
-            args.mem,
-            args.disk,
-            cmd,
-            image_mb=image_mb,
+    # 3. Línea de pre-chequeo con descriptores simulados: P7 y P9 solo miran la
+    # forma de la línea, así que el chequeo no necesita ningún fd real.
+    try:
+        precheck_cmd = vm.build_cmd(
+            config,
+            0 if args.disk > 0 else None,
+            qemu=args.qemu,
+            image_fd=0 if args.image else None,
         )
-        print(_format_results(results))
-        blocking = [
-            result
-            for result in results
-            if result.status == "FAIL" and result.blocking
-        ]
-        if blocking and not args.force:
-            print(
-                "No se arranca la VM: hay fallos bloqueantes "
-                "(usa --force para ignorarlos).",
-                file=sys.stderr,
-            )
-            return 1
-        if blocking and args.force:
-            print(
-                f"Arrancando con {len(blocking)} fallo(s) bloqueante(s) "
-                "ignorados por --force",
-                file=sys.stderr,
-            )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2 if args.image else 1
 
+    results = host_check.check_host(
+        args.mem,
+        args.disk,
+        precheck_cmd,
+        image_mb=image_mb,
+    )
+    print(_format_results(results))
+    blocking = [
+        result
+        for result in results
+        if result.status == "FAIL" and result.blocking
+    ]
+    # 4. Bloqueo sin `--force`: se sale sin haber copiado el ISO.
+    if blocking and not args.force:
+        print(
+            "No se arranca la VM: hay fallos bloqueantes "
+            "(usa --force para ignorarlos).",
+            file=sys.stderr,
+        )
+        return 1
+    if blocking and args.force:
+        print(
+            f"Arrancando con {len(blocking)} fallo(s) bloqueante(s) "
+            "ignorados por --force",
+            file=sys.stderr,
+        )
+
+    disk_fd: int | None = None
+    image_fd: int | None = None
+    try:
+        # 5. Línea base limpia: antes de crear el disco y de copiar el ISO.
         before = audit.take_snapshot()
         extras = audit.SessionExtras(image_mode=bool(args.image))
+        # 6. Medios ya autorizados por el pre-chequeo. El disco disperso (`memfd`
+        # + `ftruncate`) no ocupa RAM hasta que el guest escribe; el ISO sí se
+        # copia entero.
+        if args.disk > 0:
+            disk_fd = images.create_disk_fd(args.disk)
+        if args.image:
+            image_fd = images.create_image_fd(args.image)
+        # 7. Línea real, con los descriptores de verdad.
+        cmd = vm.build_cmd(config, disk_fd, qemu=args.qemu, image_fd=image_fd)
         exit_code = 0
         try:
             pass_fds = [

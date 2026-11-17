@@ -58,15 +58,16 @@ existe para el modo kernel.
 
 Secuencia:
 
-1. Valida la fuente de arranque: el ISO existe, o kernel e initrd existen y no
-   están vacíos.
-2. Crea el disco del guest en un `memfd` (256 MiB por defecto; `--disk 0` lo
+1. Valida la fuente de arranque y el tamaño del ISO (solo `stat`): el ISO
+   existe, o kernel e initrd existen y no están vacíos.
+2. Ejecuta el pre-chequeo del anfitrión sobre una línea de QEMU con
+   descriptores simulados: los chequeos solo miran su forma. Si hay bloqueos,
+   no arranca y no copia nada (`--force` los ignora).
+3. Toma la línea base (Shmem, MemAvailable, `/dev/shm`, memfds y QEMU vivos),
+   antes de reservar memoria para los medios.
+4. Crea el disco del guest en un `memfd` (256 MiB por defecto; `--disk 0` lo
    desactiva) y, con `--image`, copia el ISO a otro `memfd`.
-3. Construye la línea de QEMU (la necesitan los chequeos de volcado de RAM
-   y anonimato).
-4. Ejecuta el pre-chequeo del anfitrión. Si hay bloqueos, cierra los fds y no
-   arranca (`--force` los ignora).
-5. Toma la línea base (Shmem, MemAvailable, `/dev/shm`, memfds y QEMU vivos).
+5. Construye la línea de QEMU definitiva con los descriptores reales.
 6. Lanza QEMU heredando los fds del disco y del ISO.
 7. Al salir —normal, error, Ctrl-C, SIGTERM o SIGHUP— cierra el ISO, borra el
    disco si se pidió `--wipe`, cierra el disco, toma la instantánea final,
@@ -74,16 +75,25 @@ Secuencia:
    en `$XDG_STATE_HOME/vvm/last-session.json` (por defecto
    `~/.local/state/vvm/last-session.json`).
 
+El orden importa: el ISO se copia entero en RAM, así que P2 mide la memoria que
+hay de verdad antes de esa copia, y la línea base se toma antes de que el
+`memfd` del ISO (ni el del disco) exista; si no, el delta de Shmem del informe
+descontaría el tamaño del propio ISO.
+
 Detalles:
 
-- `--dry-run` imprime la línea final con `<fd>` en lugar del descriptor, no lee
-  el ISO y no ejecuta QEMU ni el pre-chequeo.
+- `--dry-run` imprime la línea final con `<fd>` en lugar de cada descriptor, no
+  crea ningún fd, no lee el ISO y no ejecuta QEMU ni el pre-chequeo.
 - `--disk 0` desactiva el disco de datos, lo habitual con un live.
 - `--wipe` sobrescribe con ceros el disco de datos antes de cerrarlo, también si
   la sesión se interrumpe. Con `--disk 0` no es un error: el informe declara
   «sin disco de datos». El ISO no se borra: se libera al cerrar su `memfd`.
 - `--headless` exige `--log` y solo vale para `--kernel/--initrd`: sin fichero
   de salida se perdería la consola del guest.
+- `--log` no aplica con `--image`: el live se pilota en la ventana y su consola
+  va a la VGA, así que la combinación se rechaza (salida 2) en vez de ignorarse.
+- `--cpus`, `--mem` y `--disk` se validan antes de copiar el ISO: un valor
+  inválido sale con código 2 y sin haber tocado la memoria.
 - `--report RUTA` escribe el informe en un fichero en vez de por pantalla
   (crea el directorio si falta).
 - Ctrl-C, SIGTERM y SIGHUP cierran la sesión de forma ordenada: se reenvía
@@ -155,5 +165,5 @@ vvm/
 ├── audit.py        # snapshots, informe y sesión en JSON
 ├── cli.py          # argparse: check | run | audit
 └── __main__.py     # python3 -m vvm
-tests/              # 147 tests, sin KVM
+tests/              # 166 tests, sin KVM
 ```
