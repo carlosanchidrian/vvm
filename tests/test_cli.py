@@ -389,7 +389,51 @@ def test_run_image_con_headless_sale_2_y_no_lanza(
 
     err = capsys.readouterr().err
     assert "--image con --headless no está soportado" in err
+    assert "medido: 1 MB leído, 0 B de log" in err
     assert "solo para --kernel/--initrd" in err
+
+
+def test_run_image_con_log_sale_2_y_no_lanza(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    log = tmp_path / "serie.log"
+    _forbid_launch(monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("no debe copiarse el ISO si --log no aplica")
+
+    monkeypatch.setattr(cli.images, "create_image_fd", boom)
+
+    assert cli.main(["run", "--image", str(iso), "--log", str(log)]) == 2
+
+    err = capsys.readouterr().err
+    assert "--image y --log son excluyentes" in err
+    assert not log.exists()
+
+
+@pytest.mark.parametrize("modo", ["image", "kernel"])
+def test_run_cpus_cero_sale_2_sin_copiar(
+    host_ok, monkeypatch, tmp_path, capsys, modo
+):
+    iso = _image(tmp_path)
+    kernel, initrd = _boot_files(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("--cpus 0 no debe llegar a crear medios ni lanzar")
+
+    monkeypatch.setattr(cli.images, "create_image_fd", boom)
+    monkeypatch.setattr(cli.images, "create_disk_fd", boom)
+    _forbid_launch(monkeypatch)
+
+    if modo == "image":
+        args = ["run", "--image", str(iso), "--cpus", "0"]
+    else:
+        args = _run_args(kernel, initrd, "--cpus", "0")
+
+    assert cli.main(args) == 2
+
+    assert "--cpus debe ser mayor que cero" in capsys.readouterr().err
 
 
 def test_run_kernel_sin_initrd_sale_2_y_no_lanza(

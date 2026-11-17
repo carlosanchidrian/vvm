@@ -59,7 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--disk", type=int, default=256, metavar="MB")
     run.add_argument("--cpus", type=int, default=1)
     run.add_argument("--headless", action="store_true")
-    run.add_argument("--log", metavar="RUTA", help="log serie (obligatorio con --headless)")
+    run.add_argument(
+        "--log",
+        metavar="RUTA",
+        help="log serie (solo --kernel/--initrd, obligatorio con --headless)",
+    )
     run.add_argument("--report", metavar="RUTA", help="escribe el informe en un fichero")
     run.add_argument("--qemu", default="qemu-system-x86_64")
     run.add_argument(
@@ -194,15 +198,27 @@ def _emit_report(report: str, report_path: str | None) -> None:
 
 
 def _boot_source_error(args: argparse.Namespace) -> str | None:
-    """Valida la fuente de arranque; devuelve el mensaje de error o None."""
+    """Valida la fuente de arranque; devuelve el mensaje de error o None.
+
+    Todo lo que se puede rechazar sin tocar la memoria se rechaza aquí, antes de
+    validar ficheros y de copiar el ISO (salida 2 en los dos modos).
+    """
     if args.image and (args.kernel or args.initrd):
         return "--image y --kernel/--initrd son excluyentes"
     if args.image and args.headless:
         return (
             "--image con --headless no está soportado.\n"
             "El cargador del ISO pinta su menú en la consola VGA y con "
-            "-display none la sesión se queda parada ahí.\n"
+            "-display none la sesión se queda parada ahí "
+            "(medido: 1 MB leído, 0 B de log).\n"
             "El modo sin ventana es solo para --kernel/--initrd."
+        )
+    if args.image and args.log:
+        return (
+            "--image y --log son excluyentes.\n"
+            "El live se pilota en la ventana (-display gtk) y la consola del "
+            "guest va a la VGA: no hay consola serie que guardar.\n"
+            "El log serie es solo para --kernel/--initrd con --headless."
         )
     if not args.image:
         if args.kernel and not args.initrd:
@@ -215,6 +231,8 @@ def _boot_source_error(args: argparse.Namespace) -> str | None:
         return f"--mem debe ser mayor que cero: {args.mem} MB"
     if args.disk < 0:
         return f"--disk no puede ser negativo: {args.disk} MB"
+    if args.cpus <= 0:
+        return f"--cpus debe ser mayor que cero: {args.cpus}"
     return None
 
 

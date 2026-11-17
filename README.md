@@ -86,6 +86,10 @@ Detalles:
 - `--disk 0` desactiva el disco de datos, lo habitual con un live.
 - `--headless` exige `--log` y solo vale para `--kernel/--initrd`: sin fichero
   de salida se perdería la consola del guest.
+- `--log` no aplica con `--image`: el live se pilota en la ventana y su consola
+  va a la VGA, así que la combinación se rechaza (salida 2) en vez de ignorarse.
+- `--cpus`, `--mem` y `--disk` se validan antes de copiar el ISO: un valor
+  inválido sale con código 2 y sin haber tocado la memoria.
 - `--report RUTA` escribe el informe en un fichero en vez de por pantalla
   (crea el directorio si falta).
 - Para salir de una sesión interactiva: **Ctrl-A x**.
