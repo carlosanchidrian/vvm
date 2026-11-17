@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 _MIB = 1024 * 1024
@@ -51,19 +52,25 @@ def validate_image(path: str) -> int:
     return size
 
 
-def create_image_fd(path: str) -> int:
+def create_image_fd(
+    path: str, *, should_stop: Callable[[], bool] | None = None
+) -> int:
     """Copia la imagen a un `memfd` anónimo y devuelve su fd.
 
     El medio se copia en bloques de 1 MiB; no se crea ninguna ruta ni entrada
     en `/dev/shm`. El llamador es responsable de cerrar el fd. Si la copia falla
     o queda corta (el fichero se acorta entre el `stat` y la lectura), se cierra
     el fd y se lanza `OSError`: nunca se devuelve un ISO con cola de ceros.
+
+    `should_stop` se consulta antes de cada bloque de 1 MiB; si devuelve `True`
+    se aborta con `InterruptedError` y el fd se cierra, para que una señal no
+    obligue a copiar gigabytes antes de atenderla.
     """
     size = validate_image(path)
     fd = os.memfd_create("vvm-iso", flags=0)
     try:
         os.ftruncate(fd, size)
-        _copy_into_memfd(path, fd, size)
+        _copy_into_memfd(path, fd, size, should_stop)
     except BaseException:
         # No solo OSError: también KeyboardInterrupt o MemoryError cierran el fd.
         os.close(fd)
@@ -71,19 +78,32 @@ def create_image_fd(path: str) -> int:
     return fd
 
 
-def _copy_into_memfd(path: str, fd: int, size: int) -> None:
+def _copy_into_memfd(
+    path: str,
+    fd: int,
+    size: int,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
     """Copia `size` bytes de `path` a `fd` y falla si la copia queda corta."""
     offset = 0
     remaining = size
     try:
         with open(path, "rb") as source:
             while remaining > 0:
+                if should_stop is not None and should_stop():
+                    raise InterruptedError(
+                        f"Se interrumpió la copia de la imagen a memoria ({path}) "
+                        f"tras {offset} de {size} bytes"
+                    )
                 chunk = source.read(min(_BLOCK_SIZE, remaining))
                 if not chunk:
                     break
                 _pwrite_all(fd, chunk, offset)
                 offset += len(chunk)
                 remaining -= len(chunk)
+    except InterruptedError:
+        # Es un OSError, pero no se reescribe: el mensaje ya dice que se abortó.
+        raise
     except OSError as exc:
         raise OSError(
             f"No se pudo copiar la imagen a memoria ({path}) tras "

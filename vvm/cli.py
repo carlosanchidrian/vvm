@@ -385,28 +385,45 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         # 7. Medios ya autorizados por el pre-chequeo. El disco disperso (`memfd`
         # + `ftruncate`) no ocupa RAM hasta que el guest escribe; el ISO sí se
-        # copia entero.
+        # copia entero. La copia consulta al guard antes de cada bloque: una
+        # señal la aborta en vez de copiar gigabytes antes de atenderla.
         if args.disk > 0:
             disk_fd = images.create_disk_fd(args.disk)
         if args.image:
-            image_fd = images.create_image_fd(args.image)
-        # Línea real, con los descriptores de verdad.
-        cmd = vm.build_cmd(config, disk_fd, qemu=args.qemu, image_fd=image_fd)
+            try:
+                image_fd = images.create_image_fd(
+                    args.image, should_stop=lambda: guard.interrupt is not None
+                )
+            except InterruptedError as exc:
+                # No hay sesión que arrancar: se sale sin QEMU y sin teardown
+                # de una sesión que no empezó. El `finally` exterior cierra el
+                # disco y restaura el guard.
+                print(f"Interrumpido: {exc}", file=sys.stderr)
+                return 128 + (guard.interrupt or signal.SIGINT)
         try:
-            pass_fds = [
-                fd for fd in (disk_fd, image_fd) if fd is not None
-            ]
-            # 8. Sesión bajo el guard del llamador: `run_session` no lo restaura.
-            outcome = vm.run_session(cmd, pass_fds=pass_fds, guard=guard)
-            exit_code = outcome.returncode
-            qemu_interrupt = outcome.interrupt
-            extras = audit.SessionExtras(
-                closure=_closure_label(outcome.interrupt),
-                killed_after=outcome.killed_after,
-                image_mode=bool(args.image),
-                disk_mb=args.disk,
-                process_io=outcome.process_io,
-            )
+            if guard.interrupt is not None:
+                # La señal llegó con los medios ya creados: no se lanza QEMU,
+                # pero el cierre es el normal (cerrar, borrar e informar).
+                exit_code = 128 + guard.interrupt
+            else:
+                # Línea real, con los descriptores de verdad.
+                cmd = vm.build_cmd(
+                    config, disk_fd, qemu=args.qemu, image_fd=image_fd
+                )
+                pass_fds = [
+                    fd for fd in (disk_fd, image_fd) if fd is not None
+                ]
+                # 8. Sesión bajo el guard del llamador: `run_session` no lo restaura.
+                outcome = vm.run_session(cmd, pass_fds=pass_fds, guard=guard)
+                exit_code = outcome.returncode
+                qemu_interrupt = outcome.interrupt
+                extras = audit.SessionExtras(
+                    closure=_closure_label(outcome.interrupt),
+                    killed_after=outcome.killed_after,
+                    image_mode=bool(args.image),
+                    disk_mb=args.disk,
+                    process_io=outcome.process_io,
+                )
         except KeyboardInterrupt:
             exit_code = 130
             qemu_interrupt = signal.SIGINT

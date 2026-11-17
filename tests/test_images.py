@@ -227,7 +227,9 @@ def test_create_image_fd_closes_the_fd_on_unexpected_error(tmp_path, monkeypatch
         created.append(fd)
         return fd
 
-    def interrupted(path: str, fd: int, size: int) -> None:
+    def interrupted(
+        path: str, fd: int, size: int, should_stop=None
+    ) -> None:
         raise KeyboardInterrupt
 
     monkeypatch.setattr(images.os, "memfd_create", capture_memfd)
@@ -236,6 +238,36 @@ def test_create_image_fd_closes_the_fd_on_unexpected_error(tmp_path, monkeypatch
     with pytest.raises(KeyboardInterrupt):
         create_image_fd(str(iso))
 
+    assert created and not _is_open(created[0])
+
+
+def test_create_image_fd_stops_between_blocks_and_closes_the_fd(
+    tmp_path, monkeypatch
+):
+    iso = tmp_path / "live.iso"
+    iso.write_bytes(b"A" * (3 * 1024 * 1024))
+    created: list[int] = []
+    real_memfd = os.memfd_create
+
+    def capture_memfd(name: str, flags: int = 0) -> int:
+        fd = real_memfd(name, flags)
+        created.append(fd)
+        return fd
+
+    monkeypatch.setattr(images.os, "memfd_create", capture_memfd)
+    calls: list[int] = []
+
+    def should_stop() -> bool:
+        calls.append(1)
+        return len(calls) > 1
+
+    with pytest.raises(InterruptedError) as excinfo:
+        create_image_fd(str(iso), should_stop=should_stop)
+
+    mensaje = str(excinfo.value)
+    assert "interrumpió la copia" in mensaje
+    assert "1048576 de 3145728" in mensaje
+    assert len(calls) == 2
     assert created and not _is_open(created[0])
 
 

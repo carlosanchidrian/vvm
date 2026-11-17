@@ -596,7 +596,7 @@ def test_run_image_prechequeo_y_linea_base_van_antes_de_copiar(
 
     monkeypatch.setattr(cli.audit, "take_snapshot", snapshot)
 
-    def copy(path):
+    def copy(path, **kwargs):
         events.append("copy")
         return real_copy(path)
 
@@ -622,7 +622,7 @@ def test_run_image_shmem_no_descuenta_el_iso(
     image_fds: list[int] = []
     real_copy = images.create_image_fd
 
-    def capture_copy(path):
+    def capture_copy(path, **kwargs):
         fd = real_copy(path)
         image_fds.append(fd)
         return fd
@@ -972,6 +972,55 @@ def test_run_wipe_declara_el_tamano_medido_del_medio(
     assert "Wipe: 7 MiB a cero en 0.010 s" in capsys.readouterr().out
     saved = audit.load_session_full(session)
     assert saved.extras.wipe == audit.WipeInfo(True, 7, 0.01)
+
+
+def test_run_sigterm_durante_la_copia_no_lanza_qemu(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+
+    def interrupted(path, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise InterruptedError(f"Se interrumpió la copia de la imagen ({path})")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("no debe lanzarse QEMU tras una copia interrumpida")
+
+    monkeypatch.setattr(cli.images, "create_image_fd", interrupted)
+    monkeypatch.setattr(cli.vm, "run_session", boom)
+
+    assert cli.main(["run", "--image", str(iso), "--disk", "8"]) == 143
+
+    assert "Interrumpido:" in capsys.readouterr().err
+
+
+def test_run_sigterm_tras_copiar_el_iso_cierra_sin_lanzar_qemu(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    session = tmp_path / "sesion.json"
+    _stub_session(monkeypatch, session)
+    real_copy = images.create_image_fd
+
+    def copy_then_interrupt(path, **kwargs):
+        fd = real_copy(path)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return fd
+
+    def boom(*args, **kwargs):
+        raise AssertionError("no debe lanzarse QEMU si ya llegó la señal")
+
+    monkeypatch.setattr(cli.images, "create_image_fd", copy_then_interrupt)
+    monkeypatch.setattr(cli.vm, "run_session", boom)
+
+    assert cli.main(["run", "--image", str(iso), "--disk", "8"]) == 143
+
+    out = capsys.readouterr().out
+    assert "Cierre: SIGTERM" in out
+    assert "Wipe: no solicitado" in out
+    saved = audit.load_session_full(session)
+    assert saved.extras.closure == "SIGTERM"
+    assert saved.extras.image_mode is True
 
 
 # --- audit ---------------------------------------------------------------
