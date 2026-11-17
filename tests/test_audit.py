@@ -13,6 +13,7 @@ import pytest
 
 from vvm import audit
 from vvm.host_check import CheckResult
+from vvm.vm import ProcessIO
 
 CLEAN_VERDICT = "SIN HALLAZGOS EN LO COMPROBADO"
 
@@ -385,6 +386,120 @@ def test_memfd_nuevo_fuera_de_la_pila_es_hallazgo():
     assert _last_line(report) == (
         "HALLAZGOS: memfd nuevo fuera de la pila del anfitrión: memfd:desconocido"
     )
+
+
+def _io(write_bytes: int = 0) -> ProcessIO:
+    return ProcessIO(
+        rchar=1000,
+        wchar=2000,
+        read_bytes=3000,
+        write_bytes=write_bytes,
+    )
+
+
+def test_io_con_gui_declara_hallazgo_y_no_niega_el_bloque():
+    extras = audit.SessionExtras(image_mode=True, process_io=_io(868_352))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "I/O del anfitrión con GUI: 868352 B; " in report
+    assert "QEMU no tiene ningún dispositivo de bloque abierto" in report
+    assert "rchar:       1000 B" in report
+    assert "write_bytes: 868352 B" in report
+    assert _last_line(report) == (
+        "HALLAZGOS: I/O del anfitrión con GUI: 868352 B; "
+        "QEMU no tiene ningún dispositivo de bloque abierto"
+    )
+
+
+def test_io_con_gui_sin_escrituras_no_es_hallazgo():
+    extras = audit.SessionExtras(image_mode=True, process_io=_io(0))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "Sin escrituras a bloque detectadas" in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_io_kernel_write_bytes_cero_es_el_testigo():
+    extras = audit.SessionExtras(image_mode=False, process_io=_io(0))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "write_bytes=0: no llegó ningún byte a un dispositivo de bloque." in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_io_kernel_con_escrituras_rompe_el_testigo():
+    extras = audit.SessionExtras(image_mode=False, process_io=_io(4096))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert _last_line(report) == (
+        "HALLAZGOS: I/O de disco inesperada en modo kernel: write_bytes=4096 B"
+    )
+
+
+def test_io_no_disponible_se_declara_sin_inventar_medidas():
+    extras = audit.SessionExtras(image_mode=True, process_io=None)
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "No disponible: no se pudo leer /proc/<pid>/io" in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_extras_del_cierre_aparecen_en_el_informe():
+    extras = audit.SessionExtras(
+        closure="SIGTERM",
+        killed_after=5.0,
+        wipe=audit.WipeInfo(requested=True, disk_mb=256, seconds=0.5),
+        image_mode=True,
+    )
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "Cierre: SIGTERM" in report
+    assert "QEMU no atendió el SIGTERM: SIGKILL a los 5 s" in report
+    assert "Wipe: 256 MiB a cero en 0.500 s" in report
+    assert "ISO: copia anónima liberada al cerrar; no se sobrescribe" in report
+
+
+def test_wipe_sin_disco_y_no_solicitado_se_declaran():
+    sin_disco = audit.build_report(
+        _snapshot(),
+        _snapshot(),
+        extras=audit.SessionExtras(wipe=audit.WipeInfo(True, 0)),
+    )
+    no_pedido = audit.build_report(_snapshot(), _snapshot())
+
+    assert "Wipe: sin disco de datos" in sin_disco
+    assert "Wipe: no solicitado" in no_pedido
+
+
+def test_save_load_conserva_los_extras(tmp_path: Path):
+    path = tmp_path / "sesion.json"
+    extras = audit.SessionExtras(
+        closure="SIGHUP",
+        killed_after=None,
+        wipe=audit.WipeInfo(requested=True, disk_mb=8, seconds=0.01),
+        image_mode=True,
+        process_io=ProcessIO(1, 2, 3, 4),
+    )
+
+    audit.save_session(path, _snapshot(), _snapshot(), extras=extras)
+
+    assert audit.load_session_full(path).extras == extras
+
+
+def test_sesion_antigua_sin_extras_usa_los_defectos(tmp_path: Path):
+    path = tmp_path / "antigua.json"
+    path.write_text(
+        json.dumps({"before": asdict(_snapshot()), "after": asdict(_snapshot())}),
+        encoding="utf-8",
+    )
+
+    assert audit.load_session_full(path).extras == audit.SessionExtras()
 
 
 def test_list_shm_entries_solo_lee(tmp_path: Path):
