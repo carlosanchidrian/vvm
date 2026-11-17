@@ -77,7 +77,7 @@ Secuencia:
    `~/.local/state/vvm/last-session.json`).
 8. Restaura los manejadores de señal.
 
-El orden importa: el ISO se copia entero en RAM, así que P2 mide la memoria que
+El orden importa: el ISO se copia entero en RAM, así que la comprobación de memoria mide la que
 hay de verdad antes de esa copia, y la línea base se toma antes de que el
 `memfd` del ISO (ni el del disco) exista; si no, el delta de Shmem del informe
 descontaría el tamaño del propio ISO.
