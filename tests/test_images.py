@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from vvm import images
 from vvm.images import create_disk_fd, create_image_fd, validate_boot_files, validate_image
 
 
@@ -122,3 +123,91 @@ def test_create_image_fd_copies_large_file_in_blocks(tmp_path):
         assert os.pread(fd, len(payload), 0) == payload
     finally:
         os.close(fd)
+
+
+class _ShortSource:
+    """Lector que anuncia un tamaño y devuelve la mitad: copia corta."""
+
+    def __init__(self, handle, limit: int):
+        self._handle = handle
+        self._left = limit
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self._handle.close()
+        return False
+
+    def read(self, size: int) -> bytes:
+        if self._left <= 0:
+            return b""
+        chunk = self._handle.read(min(size, self._left))
+        self._left -= len(chunk)
+        return chunk
+
+
+def test_create_image_fd_fails_on_short_copy_and_closes_the_fd(tmp_path, monkeypatch):
+    iso = tmp_path / "live.iso"
+    iso.write_bytes(b"A" * (2 * 1024 * 1024))
+    created: list[int] = []
+    real_memfd = os.memfd_create
+    real_open = open
+
+    def capture_memfd(name: str, flags: int = 0) -> int:
+        fd = real_memfd(name, flags)
+        created.append(fd)
+        return fd
+
+    def short_open(path, mode="r", *args, **kwargs):
+        return _ShortSource(real_open(path, mode, *args, **kwargs), 1024 * 1024)
+
+    monkeypatch.setattr(images.os, "memfd_create", capture_memfd)
+    monkeypatch.setattr(images, "open", short_open, raising=False)
+
+    with pytest.raises(OSError) as excinfo:
+        create_image_fd(str(iso))
+
+    mensaje = str(excinfo.value)
+    assert "acortó" in mensaje
+    assert str(iso) in mensaje
+    assert "1048576 de 2097152" in mensaje
+    assert created and not _is_open(created[0])
+
+
+def test_create_image_fd_closes_the_fd_on_unexpected_error(tmp_path, monkeypatch):
+    iso = tmp_path / "live.iso"
+    iso.write_bytes(b"x" * 4096)
+    created: list[int] = []
+    real_memfd = os.memfd_create
+
+    def capture_memfd(name: str, flags: int = 0) -> int:
+        fd = real_memfd(name, flags)
+        created.append(fd)
+        return fd
+
+    def interrupted(path: str, fd: int, size: int) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(images.os, "memfd_create", capture_memfd)
+    monkeypatch.setattr(images, "_copy_into_memfd", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        create_image_fd(str(iso))
+
+    assert created and not _is_open(created[0])
+
+
+def test_pwrite_all_no_gira_para_siempre_si_la_escritura_es_cero(monkeypatch):
+    monkeypatch.setattr(images.os, "pwrite", lambda fd, data, offset: 0)
+
+    with pytest.raises(OSError, match="escritura incompleta"):
+        images._pwrite_all(1, b"x" * 10, 0)
+
+
+def _is_open(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True

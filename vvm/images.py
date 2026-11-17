@@ -52,15 +52,28 @@ def create_image_fd(path: str) -> int:
     """Copia la imagen a un `memfd` anónimo y devuelve su fd.
 
     El medio se copia en bloques de 1 MiB; no se crea ninguna ruta ni entrada
-    en `/dev/shm`. El llamador es responsable de cerrar el fd.
+    en `/dev/shm`. El llamador es responsable de cerrar el fd. Si la copia falla
+    o queda corta (el fichero se acorta entre el `stat` y la lectura), se cierra
+    el fd y se lanza `OSError`: nunca se devuelve un ISO con cola de ceros.
     """
     size = validate_image(path)
     fd = os.memfd_create("vvm-iso", flags=0)
     try:
         os.ftruncate(fd, size)
+        _copy_into_memfd(path, fd, size)
+    except BaseException:
+        # No solo OSError: también KeyboardInterrupt o MemoryError cierran el fd.
+        os.close(fd)
+        raise
+    return fd
+
+
+def _copy_into_memfd(path: str, fd: int, size: int) -> None:
+    """Copia `size` bytes de `path` a `fd` y falla si la copia queda corta."""
+    offset = 0
+    remaining = size
+    try:
         with open(path, "rb") as source:
-            offset = 0
-            remaining = size
             while remaining > 0:
                 chunk = source.read(min(_BLOCK_SIZE, remaining))
                 if not chunk:
@@ -69,18 +82,28 @@ def create_image_fd(path: str) -> int:
                 offset += len(chunk)
                 remaining -= len(chunk)
     except OSError as exc:
-        os.close(fd)
         raise OSError(
-            f"No se pudo copiar la imagen a memoria ({path}): {exc}"
+            f"No se pudo copiar la imagen a memoria ({path}) tras "
+            f"{offset} de {size} bytes: {exc}"
         ) from exc
-    return fd
+    if offset != size:
+        raise OSError(
+            f"La imagen se acortó durante la copia ({path}): "
+            f"{offset} de {size} bytes copiados"
+        )
 
 
 def _pwrite_all(fd: int, data: bytes, offset: int) -> None:
     """Escribe `data` completo en `fd` desde `offset`, tolerando escrituras parciales."""
     written = 0
     while written < len(data):
-        written += os.pwrite(fd, data[written:], offset + written)
+        chunk = os.pwrite(fd, data[written:], offset + written)
+        if chunk <= 0:
+            raise OSError(
+                "escritura incompleta en el memfd: "
+                f"{written} de {len(data)} bytes en el desplazamiento {offset}"
+            )
+        written += chunk
 
 
 def validate_boot_files(kernel: str, initrd: str) -> None:
