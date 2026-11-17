@@ -284,6 +284,13 @@ def build_report(
         f"proceso QEMU vivo al cierre: pid {pid}"
         for pid in sorted(after.qemu_pids, key=_pid_sort_key)
     )
+    if details.killed_after is not None:
+        findings.append(
+            "QEMU no atendió el SIGTERM: "
+            f"SIGKILL a los {details.killed_after:g} s"
+        )
+    if details.wipe is not None and details.wipe.error is not None:
+        findings.append(f"borrado del disco falló: {details.wipe.error}")
     if details.process_io is not None:
         if details.image_mode and details.process_io.write_bytes > 0:
             findings.append(_guest_io_note(details))

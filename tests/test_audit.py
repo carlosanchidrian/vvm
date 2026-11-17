@@ -521,6 +521,39 @@ def test_extras_del_cierre_aparecen_en_el_informe():
     assert "ISO: copia anónima liberada al cerrar; no se sobrescribe" in report
 
 
+def test_sigkill_tras_la_espera_es_hallazgo():
+    extras = audit.SessionExtras(killed_after=5.0)
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "QEMU no atendió el SIGTERM: SIGKILL a los 5 s" in report
+    assert _last_line(report) == (
+        "HALLAZGOS: QEMU no atendió el SIGTERM: SIGKILL a los 5 s"
+    )
+
+
+def test_error_de_wipe_es_hallazgo():
+    extras = audit.SessionExtras(wipe=audit.WipeInfo(True, 256, error="EIO"))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "Wipe: error: EIO" in report
+    assert _last_line(report) == "HALLAZGOS: borrado del disco falló: EIO"
+
+
+def test_cierre_limpio_sigue_siendo_sin_hallazgos():
+    extras = audit.SessionExtras(
+        closure="normal",
+        wipe=audit.WipeInfo(requested=True, disk_mb=256, seconds=0.1),
+        process_io=_io(0),
+    )
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "QEMU no atendió el SIGTERM" not in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
 def test_wipe_sin_disco_y_no_solicitado_se_declaran():
     sin_disco = audit.build_report(
         _snapshot(),
