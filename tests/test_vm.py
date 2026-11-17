@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import vvm.vm as vm_module
 from vvm.vm import (
     ProcessIO,
     SignalGuard,
@@ -487,6 +488,35 @@ def test_run_session_restores_handlers_when_the_guard_is_its_own():
 
     assert outcome.returncode == 0
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_signal_guard_does_not_claim_a_kill_for_a_finished_child(monkeypatch):
+    sent: list[tuple[object, int]] = []
+    monkeypatch.setattr(
+        vm_module, "_send_signal", lambda proc, signum: sent.append((proc, signum))
+    )
+
+    class Finished:
+        """Hijo que ya terminó antes de `attach()`."""
+
+        def poll(self) -> int:
+            return 0
+
+    guard = SignalGuard()
+    guard.install()
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert guard.force_killed is True
+        # Los manejadores no tenían hijo: nada que enviar hasta `attach()`.
+        sent.clear()
+
+        guard.attach(Finished())
+
+        assert sent == []
+        assert guard.killed_after is None
+    finally:
+        guard.restore()
 
 
 def test_signal_guard_kill_pending_before_attach_is_sent_on_attach():

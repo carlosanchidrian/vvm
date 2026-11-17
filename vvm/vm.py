@@ -290,9 +290,11 @@ class SignalGuard:
 
         Con una sola señal se reenvía SIGTERM; si ya habían llegado dos, el
         SIGKILL pendiente se envía aquí y se anota el tiempo desde la primera.
+        Si el hijo ya terminó no se envía nada ni se anota un SIGKILL que nunca
+        se envió.
         """
         self._proc = proc
-        if not self.interrupts:
+        if not self.interrupts or proc.poll() is not None:
             return
         if self.force_killed:
             if self.killed_after is None:
