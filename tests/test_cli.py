@@ -1023,6 +1023,61 @@ def test_run_sigterm_tras_copiar_el_iso_cierra_sin_lanzar_qemu(
     assert saved.extras.image_mode is True
 
 
+def test_run_wipe_fallido_sale_1_y_es_hallazgo(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    kernel, initrd = _boot_files(tmp_path)
+    session = tmp_path / "sesion.json"
+    _stub_session(monkeypatch, session)
+
+    def failing(fd):
+        raise OSError("EIO simulado")
+
+    monkeypatch.setattr(cli.images, "wipe_fd", failing)
+
+    code = cli.main(
+        _run_args(kernel, initrd, "--qemu", "/bin/true", "--disk", "8", "--wipe")
+    )
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "Wipe: error: EIO simulado" in captured.out
+    assert "HALLAZGOS: borrado del disco falló: EIO simulado" in captured.out
+    assert "cierre quedó incompleto" in captured.err
+    saved = audit.load_session_full(session)
+    assert saved.extras.wipe is not None
+    assert saved.extras.wipe.error == "EIO simulado"
+
+
+def test_run_wipe_fallido_conserva_el_codigo_de_senal(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    kernel, initrd = _boot_files(tmp_path)
+    session = tmp_path / "sesion.json"
+    _stub_session(monkeypatch, session)
+
+    def failing(fd):
+        raise OSError("EIO simulado")
+
+    monkeypatch.setattr(cli.images, "wipe_fd", failing)
+    monkeypatch.setattr(
+        cli.vm,
+        "run_session",
+        lambda cmd, pass_fds=(), **kwargs: cli.vm.RunOutcome(
+            returncode=143, interrupt=signal.SIGTERM
+        ),
+    )
+
+    code = cli.main(
+        _run_args(kernel, initrd, "--qemu", "/bin/true", "--disk", "8", "--wipe")
+    )
+
+    assert code == 143
+    captured = capsys.readouterr()
+    assert "HALLAZGOS: borrado del disco falló: EIO simulado" in captured.out
+    assert "cierre quedó incompleto" not in captured.err
+
+
 # --- audit ---------------------------------------------------------------
 
 

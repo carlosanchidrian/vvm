@@ -494,6 +494,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     if qemu_interrupt is None and guard.interrupt is not None:
         # Señal que no inició el cierre de QEMU (p. ej. durante el wipe).
         exit_code = 128 + guard.interrupt
+    if (
+        extras.wipe is not None
+        and extras.wipe.error is not None
+        and exit_code == 0
+    ):
+        # Un wipe pedido y fallido es un cierre incompleto: no puede salir 0.
+        # Si ya había un código de señal (130/143/129) se conserva.
+        print(
+            "El cierre quedó incompleto por el error de borrado; se sale con 1.",
+            file=sys.stderr,
+        )
+        exit_code = 1
     return exit_code
 
 
