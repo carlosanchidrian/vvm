@@ -432,3 +432,54 @@ def test_p9_disk_zero_with_image_fd_is_ok(readers):
 
     assert p9.status == "OK"
     assert "file=/dev/fd/9" in p9.evidence
+    assert "cdrom por fd" in p9.evidence
+    assert "sin disco de datos" in p9.evidence
+
+
+def _image_cmd(disk_drive: str | None) -> list[str]:
+    """Línea de modo imagen: cdrom por fd y, si toca, disco de datos."""
+    cmd = [
+        "qemu-system-x86_64",
+        "-object",
+        "memory-backend-memfd,id=mem,size=4096M,share=off",
+        "-machine",
+        "q35,memory-backend=mem,dump-guest-core=off,mem-merge=off",
+        "-drive",
+        "file=/dev/fd/9,format=raw,media=cdrom,readonly=on",
+        "-boot",
+        "d",
+    ]
+    if disk_drive is not None:
+        cmd += ["-drive", disk_drive]
+    return cmd
+
+
+def test_p9_image_cdrom_and_virtio_by_fd_is_ok_and_cites_virtio(readers):
+    cmd = _image_cmd("file=/dev/fd/7,format=raw,if=virtio,cache=writethrough")
+
+    p9 = result_of(run_check(readers, disk_mb=256, cmd=cmd), "P9")
+
+    assert p9.status == "OK"
+    assert "disco por fd: file=/dev/fd/7,format=raw,if=virtio" in p9.evidence
+    # La evidencia del disco de datos no puede ser la del cdrom.
+    assert "disco por fd: file=/dev/fd/9" not in p9.evidence
+
+
+def test_p9_image_virtio_by_path_fails_despite_cdrom_by_fd(readers):
+    cmd = _image_cmd("file=/tmp/disco.img,format=raw,if=virtio,cache=writethrough")
+
+    p9 = result_of(run_check(readers, disk_mb=256, cmd=cmd), "P9")
+
+    assert p9.status == "FAIL"
+    assert p9.blocking is True
+    assert "disco por fd: ausente" in p9.evidence
+    assert "/tmp/disco.img" in p9.evidence
+
+
+def test_p9_image_without_data_drive_fails_if_disk_requested(readers):
+    cmd = _image_cmd(None)
+
+    p9 = result_of(run_check(readers, disk_mb=256, cmd=cmd), "P9")
+
+    assert p9.status == "FAIL"
+    assert "disco por fd: ausente" in p9.evidence
