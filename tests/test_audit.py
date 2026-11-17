@@ -404,6 +404,46 @@ def test_memfd_nuevo_fuera_de_la_pila_es_hallazgo():
     )
 
 
+def test_sesion_antigua_sin_memfds_dice_no_medido(tmp_path: Path):
+    path = tmp_path / "antigua.json"
+    bloque = asdict(_snapshot())
+    bloque.pop("memfds")
+    path.write_text(
+        json.dumps({"before": bloque, "after": bloque}),
+        encoding="utf-8",
+    )
+
+    session = audit.load_session_full(path)
+
+    assert session.before.memfds is None
+    assert session.after.memfds is None
+    report = audit.build_report(session.before, session.after)
+    assert "no medido en esta sesión" in report
+    assert "Memfds nuevos fuera de esa pila: ninguno" not in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_memfds_vacios_medidos_se_informan_como_ninguno():
+    before = _snapshot(memfds=())
+    after = _snapshot(memfds=(), taken_at="2026-10-24T10:05:00Z")
+
+    report = audit.build_report(before, after)
+
+    assert "Memfds nuevos fuera de esa pila: ninguno" in report
+    assert "no medido" not in report
+
+
+def test_save_load_conserva_memfds_no_medidos(tmp_path: Path):
+    path = tmp_path / "sesion.json"
+
+    audit.save_session(path, _snapshot(memfds=None), _snapshot(memfds=None))
+
+    before, after = audit.load_session(path)
+    assert before.memfds is None
+    assert after.memfds is None
+    assert json.loads(path.read_text(encoding="utf-8"))["before"]["memfds"] is None
+
+
 def test_list_shm_entries_solo_lee(tmp_path: Path):
     (tmp_path / "b").write_text("", encoding="utf-8")
     (tmp_path / "a").write_text("", encoding="utf-8")
