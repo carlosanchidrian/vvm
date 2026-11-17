@@ -338,6 +338,153 @@ def test_run_headless_sin_log_sale_1(host_ok, monkeypatch, tmp_path, capsys):
     assert "log serie" in capsys.readouterr().err
 
 
+# --- run --image ---------------------------------------------------------
+
+
+def _image(tmp_path: Path, size: int = 3 * 1024 * 1024) -> Path:
+    iso = tmp_path / "live.iso"
+    iso.write_bytes(b"ISO" * (size // 3))
+    return iso
+
+
+def _forbid_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args, **kwargs):
+        raise AssertionError("no debe lanzarse nada con argumentos inválidos")
+
+    monkeypatch.setattr(cli.vm, "run_vm", boom)
+
+
+def test_run_image_con_kernel_sale_2_y_no_lanza(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    kernel, initrd = _boot_files(tmp_path)
+    iso = _image(tmp_path)
+    _forbid_launch(monkeypatch)
+
+    code = cli.main(
+        [
+            "run",
+            "--image",
+            str(iso),
+            "--kernel",
+            str(kernel),
+            "--initrd",
+            str(initrd),
+        ]
+    )
+
+    assert code == 2
+    assert "--image y --kernel/--initrd son excluyentes" in capsys.readouterr().err
+
+
+def test_run_image_con_headless_sale_2_y_no_lanza(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    _forbid_launch(monkeypatch)
+
+    assert cli.main(["run", "--image", str(iso), "--headless"]) == 2
+
+    err = capsys.readouterr().err
+    assert "--image con --headless no está soportado" in err
+    assert "solo para --kernel/--initrd" in err
+
+
+def test_run_kernel_sin_initrd_sale_2_y_no_lanza(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    kernel, _ = _boot_files(tmp_path)
+    _forbid_launch(monkeypatch)
+
+    assert cli.main(["run", "--kernel", str(kernel)]) == 2
+
+    assert "--kernel sin --initrd" in capsys.readouterr().err
+
+
+def test_run_image_inexistente_sale_2(host_ok, monkeypatch, tmp_path, capsys):
+    missing = tmp_path / "no-existe.iso"
+    _forbid_launch(monkeypatch)
+
+    assert cli.main(["run", "--image", str(missing)]) == 2
+
+    err = capsys.readouterr().err
+    assert "--image no encontrada" in err
+    assert str(missing) in err
+
+
+def test_run_image_dry_run_imprime_fd_y_no_lee_el_iso(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+
+    def boom(path):
+        raise AssertionError("--dry-run no debe copiar el ISO")
+
+    monkeypatch.setattr(cli.images, "create_image_fd", boom)
+    _forbid_launch(monkeypatch)
+
+    assert cli.main(["run", "--image", str(iso), "--dry-run"]) == 0
+
+    out = capsys.readouterr().out
+    assert "file=/dev/fd/<fd>,format=raw,media=cdrom,readonly=on" in out
+    assert "-boot d" in out
+    assert "-display gtk" in out
+    assert "-kernel" not in out
+
+
+def test_run_image_disk_zero_no_crea_disco_de_datos(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    session = tmp_path / "sesion.json"
+    _stub_session(monkeypatch, session)
+
+    def boom(size_mb):
+        raise AssertionError("--disk 0 no debe crear el disco de datos")
+
+    monkeypatch.setattr(cli.images, "create_disk_fd", boom)
+
+    assert cli.main(["run", "--image", str(iso), "--disk", "0", "--qemu", "/bin/true"]) == 0
+
+    out = capsys.readouterr().out
+    assert "SIN HALLAZGOS EN LO COMPROBADO" in out
+    saved = audit.load_session_full(session)
+    assert len(saved.checks or ()) == 10
+
+
+def test_run_image_con_qemu_true_emite_informe(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    session = tmp_path / "sesion.json"
+    _stub_session(monkeypatch, session)
+
+    assert cli.main(["run", "--image", str(iso), "--qemu", "/bin/true"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Informe de sesión VVM" in out
+    assert "SIN HALLAZGOS EN LO COMPROBADO" in out
+
+
+def test_check_image_cuenta_el_tamano_y_avisa_de_mem_baja(host_ok, tmp_path, capsys):
+    iso = _image(tmp_path)
+
+    assert cli.main(["check", "--image", str(iso)]) == 0
+
+    out = capsys.readouterr().out
+    assert "necesario=1283 MB" in out
+    assert "3 imagen" in out
+    assert "aviso" in out
+
+
+def test_check_image_inexistente_sale_2(tmp_path, capsys):
+    missing = tmp_path / "no-existe.iso"
+
+    assert cli.main(["check", "--image", str(missing)]) == 2
+
+    assert "--image no encontrada" in capsys.readouterr().err
+
+
 # --- audit ---------------------------------------------------------------
 
 

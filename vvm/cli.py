@@ -26,6 +26,7 @@ from vvm.host_check import CheckResult
 # inspeccionan, porque no hay kernel ni initrd reales que pasar.
 _PLACEHOLDER_KERNEL = "<kernel>"
 _PLACEHOLDER_INITRD = "<initrd>"
+_PLACEHOLDER_FD = "<fd>"
 
 _STATUS_LABELS = {"OK": "OK", "WARN": "AVISO", "FAIL": "FALLA"}
 _STATUS_COLORS = {"OK": "\033[32m", "WARN": "\033[33m", "FAIL": "\033[31m"}
@@ -41,13 +42,15 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", metavar="{check,run,audit}")
 
     check = subparsers.add_parser("check", help="pre-chequeo P1-P10 del anfitrión")
+    check.add_argument("--image", metavar="ISO", help="imagen ISO del live")
     check.add_argument("--mem", type=int, default=512, metavar="MB")
     check.add_argument("--disk", type=int, default=256, metavar="MB")
     check.add_argument("--json", action="store_true", help="salida legible por máquina")
 
     run = subparsers.add_parser("run", help="arranca una sesión")
-    run.add_argument("--kernel", required=True, help="vmlinuz del guest")
-    run.add_argument("--initrd", required=True, help="initramfs del guest")
+    run.add_argument("--image", metavar="ISO", help="imagen ISO del live (con ventana)")
+    run.add_argument("--kernel", help="vmlinuz del guest")
+    run.add_argument("--initrd", help="initramfs del guest")
     run.add_argument("--mem", type=int, default=512, metavar="MB")
     run.add_argument("--disk", type=int, default=256, metavar="MB")
     run.add_argument("--cpus", type=int, default=1)
@@ -110,17 +113,46 @@ def _format_results(results: Sequence[CheckResult]) -> str:
     return "\n".join(blocks)
 
 
+def _image_mb(size_bytes: int) -> int:
+    """Tamaño del ISO redondeado hacia arriba a MiB (lo que P2 suma)."""
+    mib = 1024 * 1024
+    return (size_bytes + mib - 1) // mib
+
+
 def cmd_check(args: argparse.Namespace) -> int:
-    cmd = vm.build_cmd(
-        vm.VmConfig(
-            kernel=_PLACEHOLDER_KERNEL,
-            initrd=_PLACEHOLDER_INITRD,
-            mem_mb=args.mem,
-            disk_mb=args.disk,
-        ),
-        disk_fd=0,
+    image_mb = 0
+    try:
+        if args.image:
+            image_mb = _image_mb(images.validate_image(args.image))
+            cmd = vm.build_cmd(
+                vm.VmConfig(
+                    image=args.image,
+                    mem_mb=args.mem,
+                    disk_mb=args.disk,
+                ),
+                disk_fd=0 if args.disk > 0 else None,
+                image_fd=_PLACEHOLDER_FD,
+            )
+        else:
+            cmd = vm.build_cmd(
+                vm.VmConfig(
+                    kernel=_PLACEHOLDER_KERNEL,
+                    initrd=_PLACEHOLDER_INITRD,
+                    mem_mb=args.mem,
+                    disk_mb=args.disk,
+                ),
+                disk_fd=0 if args.disk > 0 else None,
+            )
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    results = host_check.check_host(
+        args.mem,
+        args.disk,
+        cmd,
+        image_mb=image_mb,
     )
-    results = host_check.check_host(args.mem, args.disk, cmd)
     if args.json:
         print(json.dumps([asdict(result) for result in results], ensure_ascii=False, indent=2))
     else:
@@ -128,8 +160,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 1 if host_check.has_blocking(results) else 0
 
 
-def _close_disk_fd(fd: int | None) -> None:
-    """Cierra el fd del disco; el `finally` exterior lo usa como red de seguridad."""
+def _close_fd(fd: int | None) -> None:
+    """Cierra un descriptor; el `finally` exterior lo usa como red de seguridad."""
     if fd is None:
         return
     try:
@@ -157,23 +189,62 @@ def _emit_report(report: str, report_path: str | None) -> None:
         print(f"Informe escrito en {report_path}")
 
 
+def _boot_source_error(args: argparse.Namespace) -> str | None:
+    """Valida la fuente de arranque; devuelve el mensaje de error o None."""
+    if args.image and (args.kernel or args.initrd):
+        return "--image y --kernel/--initrd son excluyentes"
+    if args.image and args.headless:
+        return (
+            "--image con --headless no está soportado.\n"
+            "El cargador del ISO pinta su menú en la consola VGA y con "
+            "-display none la sesión se queda parada ahí.\n"
+            "El modo sin ventana es solo para --kernel/--initrd."
+        )
+    if not args.image:
+        if args.kernel and not args.initrd:
+            return "--kernel sin --initrd"
+        if args.initrd and not args.kernel:
+            return "--initrd sin --kernel"
+        if not args.kernel and not args.initrd:
+            return "Falta la fuente de arranque: usa --image o --kernel/--initrd"
+    if args.mem <= 0:
+        return f"--mem debe ser mayor que cero: {args.mem} MB"
+    if args.disk < 0:
+        return f"--disk no puede ser negativo: {args.disk} MB"
+    return None
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    error = _boot_source_error(args)
+    if error is not None:
+        print(f"Error: {error}", file=sys.stderr)
+        return 2
+
+    image_mb = 0
     try:
-        images.validate_boot_files(args.kernel, args.initrd)
+        if args.image:
+            image_mb = _image_mb(images.validate_image(args.image))
+        else:
+            images.validate_boot_files(args.kernel, args.initrd)
     except (OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        return 2 if args.image else 1
 
     disk_fd: int | None = None
+    image_fd: int | None = None
     try:
-        # El fd se crea antes de la línea (P9 la inspecciona) y es inocuo:
-        # solo reserva memoria, no escribe en disco.
-        disk_fd = images.create_disk_fd(args.disk)
+        # Los fds se crean antes de la línea (P9 la inspecciona) y son inocuos:
+        # solo reservan memoria, no escriben en disco.
+        if args.disk > 0:
+            disk_fd = images.create_disk_fd(args.disk)
+        if args.image and not args.dry_run:
+            image_fd = images.create_image_fd(args.image)
         try:
             cmd = vm.build_cmd(
                 vm.VmConfig(
                     kernel=args.kernel,
                     initrd=args.initrd,
+                    image=args.image,
                     mem_mb=args.mem,
                     disk_mb=args.disk,
                     cpus=args.cpus,
@@ -182,16 +253,26 @@ def cmd_run(args: argparse.Namespace) -> int:
                 ),
                 disk_fd,
                 qemu=args.qemu,
+                image_fd=(
+                    image_fd
+                    if image_fd is not None
+                    else (_PLACEHOLDER_FD if args.image else None)
+                ),
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
-            return 1
+            return 2 if args.image else 1
 
         if args.dry_run:
             print(shlex.join(cmd))
             return 0
 
-        results = host_check.check_host(args.mem, args.disk, cmd)
+        results = host_check.check_host(
+            args.mem,
+            args.disk,
+            cmd,
+            image_mb=image_mb,
+        )
         print(_format_results(results))
         blocking = [
             result
@@ -215,7 +296,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         before = audit.take_snapshot()
         exit_code = 0
         try:
-            exit_code = vm.run_vm(cmd, pass_fds=[disk_fd])
+            pass_fds = [
+                fd for fd in (disk_fd, image_fd) if fd is not None
+            ]
+            exit_code = vm.run_vm(cmd, pass_fds=pass_fds)
         except KeyboardInterrupt:
             exit_code = 130
             print(
@@ -224,10 +308,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
         finally:
             # El informe sale pase lo que pase: salida normal, Ctrl-C o error de QEMU.
-            # Cerrar el disco antes de medir: si no, Shmem incluye lo que el guest
-            # escribió y el «después» nunca vuelve a la línea base. El finally
-            # exterior queda como red de seguridad si algo falla antes.
-            _close_disk_fd(disk_fd)
+            # Cerrar los medios antes de medir: si no, Shmem incluye lo que el
+            # guest escribió y el «después» nunca vuelve a la línea base. El
+            # finally exterior queda como red de seguridad si algo falla antes.
+            _close_fd(image_fd)
+            image_fd = None
+            _close_fd(disk_fd)
             disk_fd = None
             try:
                 after = audit.take_snapshot()
@@ -251,7 +337,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 audit.build_report(
                     before,
                     after,
-                    args.log,
+                    None if args.image else args.log,
                     checks=tuple(results),
                     forced=args.force,
                 ),
@@ -262,7 +348,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
-        _close_disk_fd(disk_fd)
+        _close_fd(image_fd)
+        _close_fd(disk_fd)
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
