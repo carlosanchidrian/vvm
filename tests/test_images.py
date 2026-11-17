@@ -14,8 +14,6 @@ from vvm.images import (
     validate_image,
     wipe_fd,
 )
-from vvm import images
-from vvm.images import create_disk_fd, create_image_fd, validate_boot_files, validate_image
 
 
 def test_create_disk_fd_is_256_mib():
