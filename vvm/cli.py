@@ -273,7 +273,7 @@ def _wipe_disk(
         )
     return audit.WipeInfo(
         requested=True,
-        disk_mb=args.disk,
+        disk_mb=result.size_mb,
         seconds=result.seconds,
     )
 
@@ -491,15 +491,16 @@ def cmd_audit(args: argparse.Namespace) -> int:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"No se pudo cargar la sesión: {exc}", file=sys.stderr)
         return 1
-    print(
-        audit.build_report(
-            session.before,
-            session.after,
-            checks=session.checks,
-            forced=session.forced,
-            extras=session.extras,
-        )
+    report = audit.build_report(
+        session.before,
+        session.after,
+        checks=session.checks,
+        forced=session.forced,
+        extras=session.extras,
     )
+    # `build_report` ya termina en salto de línea: sin uno extra, el informe de
+    # `audit` es byte a byte igual al que escribió `run`.
+    sys.stdout.write(report)
     return 0
 
 

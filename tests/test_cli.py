@@ -931,6 +931,28 @@ def test_run_sigterm_durante_el_wipe_conserva_informe_y_sesion(tmp_path):
     assert session.extras.wipe.disk_mb == 8
 
 
+def test_run_wipe_declara_el_tamano_medido_del_medio(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    kernel, initrd = _boot_files(tmp_path)
+    session = tmp_path / "sesion.json"
+    _stub_session(monkeypatch, session)
+    monkeypatch.setattr(
+        cli.images,
+        "wipe_fd",
+        lambda fd: images.WipeResult(size_mb=7, seconds=0.01),
+    )
+
+    code = cli.main(
+        _run_args(kernel, initrd, "--qemu", "/bin/true", "--disk", "8", "--wipe")
+    )
+
+    assert code == 0
+    assert "Wipe: 7 MiB a cero en 0.010 s" in capsys.readouterr().out
+    saved = audit.load_session_full(session)
+    assert saved.extras.wipe == audit.WipeInfo(True, 7, 0.01)
+
+
 # --- audit ---------------------------------------------------------------
 
 
@@ -977,6 +999,27 @@ def test_audit_reconstruye_prechequeo_forzado(tmp_path, capsys):
         "SIN HALLAZGOS EN LO COMPROBADO · sesión forzada con 1 fallo(s) bloqueante(s)"
         in out
     )
+
+
+def test_audit_reproduce_el_informe_byte_a_byte(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    kernel, initrd = _boot_files(tmp_path)
+    session = tmp_path / "sesion.json"
+    report = tmp_path / "informe.txt"
+    _stub_session(monkeypatch, session)
+
+    code = cli.main(
+        _run_args(kernel, initrd, "--qemu", "/bin/true", "--report", str(report))
+    )
+    assert code == 0
+    capsys.readouterr()
+
+    assert cli.main(["audit", "--session", str(session)]) == 0
+
+    texto = report.read_text(encoding="utf-8")
+    assert capsys.readouterr().out == texto
+    assert texto.endswith("\n") and not texto.endswith("\n\n")
 
 
 def test_audit_usa_la_sesion_por_defecto(monkeypatch, tmp_path, capsys):
