@@ -23,6 +23,7 @@ def _snapshot(
     shm_entries: tuple[str, ...] = (),
     qemu_pids: tuple[str, ...] = (),
     taken_at: str = "2026-10-24T10:00:00Z",
+    memfds: tuple[str, ...] = (),
 ) -> audit.Snapshot:
     return audit.Snapshot(
         shmem_kb=shmem_kb,
@@ -30,6 +31,7 @@ def _snapshot(
         shm_entries=shm_entries,
         qemu_pids=qemu_pids,
         taken_at=taken_at,
+        memfds=memfds,
     )
 
 
@@ -260,6 +262,7 @@ def test_save_load_roundtrip(tmp_path: Path):
         shm_entries=("a", "b"),
         qemu_pids=("11", "12"),
         taken_at="2026-10-24T10:05:00Z",
+        memfds=("memfd:displaysurface",),
     )
     path = tmp_path / "estado" / "vvm" / "last-session.json"
 
@@ -315,6 +318,11 @@ def test_take_snapshot_compone_lectores(monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(audit, "list_shm_entries", lambda shm_dir=audit.SHM_PATH: ("x",))
     monkeypatch.setattr(audit, "live_qemu_pids", lambda proc_dir=audit.PROC_PATH: ("777",))
+    monkeypatch.setattr(
+        audit,
+        "list_memfd_names",
+        lambda proc_dir=audit.PROC_PATH: ("memfd:displaysurface",),
+    )
 
     snapshot = audit.take_snapshot()
 
@@ -322,7 +330,61 @@ def test_take_snapshot_compone_lectores(monkeypatch: pytest.MonkeyPatch):
     assert snapshot.mem_available_kb == 5678
     assert snapshot.shm_entries == ("x",)
     assert snapshot.qemu_pids == ("777",)
+    assert snapshot.memfds == ("memfd:displaysurface",)
     assert snapshot.taken_at.endswith("Z")
+
+
+def _fake_memfd(proc: Path, pid: str, fd: str, target: str) -> None:
+    fd_dir = proc / pid / "fd"
+    fd_dir.mkdir(parents=True, exist_ok=True)
+    (fd_dir / fd).symlink_to(target)
+
+
+def test_list_memfd_names_lee_enlaces_y_normaliza_deleted(tmp_path: Path):
+    _fake_memfd(tmp_path, "100", "3", "/memfd:displaysurface (deleted)")
+    _fake_memfd(tmp_path, "100", "4", "/memfd:wayland-cursor (deleted)")
+    _fake_memfd(tmp_path, "200", "5", "/memfd:pulseaudio")
+    _fake_memfd(tmp_path, "200", "6", "/home/ejemplo/fichero")
+
+    assert audit.list_memfd_names(tmp_path) == (
+        "memfd:displaysurface",
+        "memfd:pulseaudio",
+        "memfd:wayland-cursor",
+    )
+
+
+def test_memfds_de_la_pila_del_anfitrion_no_son_hallazgo():
+    before = _snapshot()
+    after = _snapshot(
+        taken_at="2026-10-24T10:05:00Z",
+        memfds=(
+            "memfd:displaysurface",
+            "memfd:wayland-cursor",
+            "memfd:pulseaudio",
+        ),
+    )
+
+    report = audit.build_report(before, after)
+
+    assert "Memfds nuevos de la pila del anfitrión (no del guest): " in report
+    assert "memfd:displaysurface" in report
+    assert "Memfds nuevos fuera de esa pila: ninguno" in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_memfd_nuevo_fuera_de_la_pila_es_hallazgo():
+    before = _snapshot()
+    after = _snapshot(
+        taken_at="2026-10-24T10:05:00Z",
+        memfds=("memfd:displaysurface", "memfd:desconocido"),
+    )
+
+    report = audit.build_report(before, after)
+
+    assert "memfd:displaysurface" in report
+    assert _last_line(report) == (
+        "HALLAZGOS: memfd nuevo fuera de la pila del anfitrión: memfd:desconocido"
+    )
 
 
 def test_list_shm_entries_solo_lee(tmp_path: Path):

@@ -26,6 +26,16 @@ PROC_PATH = Path("/proc")
 _QEMU_PREFIX = "qemu-system-"
 _SESSION_MARKER_BYTES = SESSION_MARKER.encode()
 
+# Memfds que crea el escritorio (pantalla, cursor y audio). Se comparan con la
+# línea base y se declaran como pila del anfitrión, nunca como fuga del guest.
+HOST_STACK_MEMFDS = frozenset(
+    {
+        "memfd:displaysurface",
+        "memfd:wayland-cursor",
+        "memfd:pulseaudio",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Snapshot:
@@ -36,6 +46,7 @@ class Snapshot:
     shm_entries: tuple[str, ...]
     qemu_pids: tuple[str, ...]
     taken_at: str
+    memfds: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -76,6 +87,35 @@ def list_shm_entries(shm_dir: Path = SHM_PATH) -> tuple[str, ...]:
             return tuple(sorted(entry.name for entry in entries))
     except OSError as exc:
         raise RuntimeError(f"No se pudo listar {shm_dir}: {exc}") from exc
+
+
+def list_memfd_names(proc_dir: Path = PROC_PATH) -> tuple[str, ...]:
+    """Nombres `memfd:*` visibles en los descriptores abiertos de `/proc`.
+
+    Se leen enlaces de `/proc/<pid>/fd` (no se abre ni se toca ningún memfd) y
+    se normaliza el sufijo ` (deleted)` que añade el kernel.
+    """
+    names: set[str] = set()
+    try:
+        with os.scandir(proc_dir) as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    with os.scandir(Path(entry.path) / "fd") as fds:
+                        for fd_entry in fds:
+                            try:
+                                target = os.readlink(fd_entry.path)
+                            except OSError:
+                                continue
+                            if "/memfd:" in target:
+                                raw = target.split("/memfd:", 1)[1]
+                                names.add("memfd:" + raw.split(" (deleted)", 1)[0])
+                except OSError:
+                    continue
+    except OSError as exc:
+        raise RuntimeError(f"No se pudo listar {proc_dir}: {exc}") from exc
+    return tuple(sorted(names))
 
 
 def live_qemu_pids(proc_dir: Path = PROC_PATH) -> tuple[str, ...]:
@@ -129,6 +169,7 @@ def take_snapshot() -> Snapshot:
         shm_entries=list_shm_entries(SHM_PATH),
         qemu_pids=live_qemu_pids(PROC_PATH),
         taken_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        memfds=list_memfd_names(PROC_PATH),
     )
 
 
@@ -190,8 +231,15 @@ def build_report(
     arrancó con `--force`.
     """
     new_entries = sorted(set(after.shm_entries) - set(before.shm_entries))
+    new_memfds = sorted(set(after.memfds) - set(before.memfds))
+    host_memfds = [name for name in new_memfds if name in HOST_STACK_MEMFDS]
+    other_memfds = [name for name in new_memfds if name not in HOST_STACK_MEMFDS]
     findings: list[str] = []
     findings.extend(f"entrada nueva en /dev/shm: {name}" for name in new_entries)
+    findings.extend(
+        f"memfd nuevo fuera de la pila del anfitrión: {name}"
+        for name in other_memfds
+    )
     findings.extend(
         f"proceso QEMU vivo al cierre: pid {pid}"
         for pid in sorted(after.qemu_pids, key=_pid_sort_key)
@@ -212,10 +260,14 @@ def build_report(
         "",
         *_precheck_lines(checks, forced),
         "",
-        "1. Entradas de /dev/shm",
+        "1. Entradas de /dev/shm y memfds",
         f"   Antes:   {_format_entries(before.shm_entries)}",
         f"   Después: {_format_entries(after.shm_entries)}",
         "   Nuevas:  " + (", ".join(new_entries) if new_entries else "ninguna"),
+        "   Memfds nuevos de la pila del anfitrión (no del guest): "
+        + (", ".join(host_memfds) if host_memfds else "ninguno"),
+        "   Memfds nuevos fuera de esa pila: "
+        + (", ".join(other_memfds) if other_memfds else "ninguno"),
         "",
         "2. Procesos QEMU de esta sesión vivos al cierre",
         f"   Antes:   {_format_entries(before.qemu_pids)}",
@@ -369,6 +421,7 @@ def _snapshot_to_dict(snapshot: Snapshot) -> dict[str, object]:
         "shm_entries": list(snapshot.shm_entries),
         "qemu_pids": list(snapshot.qemu_pids),
         "taken_at": snapshot.taken_at,
+        "memfds": list(snapshot.memfds),
     }
 
 
@@ -447,10 +500,19 @@ def _snapshot_from_dict(raw: object, block: str, path: Path) -> Snapshot:
             f"El campo 'taken_at' del bloque '{block}' de la sesión {path} "
             "debe ser una cadena no vacía."
         )
+    memfds_raw = raw.get("memfds", [])
+    if not isinstance(memfds_raw, (list, tuple)) or not all(
+        isinstance(item, str) for item in memfds_raw
+    ):
+        raise ValueError(
+            f"El campo 'memfds' del bloque '{block}' de la sesión {path} "
+            "debe ser una lista de cadenas."
+        )
     return Snapshot(
         shmem_kb=raw["shmem_kb"],
         mem_available_kb=raw["mem_available_kb"],
         shm_entries=sequences["shm_entries"],
         qemu_pids=sequences["qemu_pids"],
         taken_at=taken_at,
+        memfds=tuple(memfds_raw),
     )
