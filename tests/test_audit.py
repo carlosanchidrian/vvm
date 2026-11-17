@@ -427,7 +427,9 @@ def _io(write_bytes: int = 0) -> ProcessIO:
 
 
 def test_io_con_gui_declara_hallazgo_y_no_niega_el_bloque():
-    extras = audit.SessionExtras(image_mode=True, process_io=_io(868_352))
+    extras = audit.SessionExtras(
+        image_mode=True, disk_mb=0, process_io=_io(868_352)
+    )
 
     report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
 
@@ -464,6 +466,34 @@ def test_io_imagen_con_disco_de_datos_no_niega_el_bloque():
     )
     assert nota in report
     assert _last_line(report) == "HALLAZGOS: " + nota
+
+
+def test_io_imagen_sin_medida_del_disco_no_afirma_que_no_haya_bloque():
+    # Sesión antigua: `extras` con imagen e I/O, pero sin `disk_mb`.
+    extras = audit.SessionExtras(image_mode=True, process_io=_io(868_352))
+    assert extras.disk_mb is None
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "QEMU no tiene ningún dispositivo de bloque abierto" not in report
+    nota = (
+        "I/O con GUI: 868352 B; el disco de datos no se midió en esta sesión, "
+        "así que la escritura no se puede atribuir solo al anfitrión"
+    )
+    assert nota in report
+    assert _last_line(report) == "HALLAZGOS: " + nota
+
+
+def test_save_load_conserva_disk_mb_sin_medir(tmp_path: Path):
+    path = tmp_path / "sesion.json"
+    extras = audit.SessionExtras(
+        image_mode=True, disk_mb=None, process_io=ProcessIO(1, 2, 3, 4)
+    )
+
+    audit.save_session(path, _snapshot(), _snapshot(), extras=extras)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["extras"]["disk_mb"] is None
+    assert audit.load_session_full(path).extras == extras
 
 
 def test_io_imagen_sin_disco_mantiene_la_frase_de_la_especificacion():

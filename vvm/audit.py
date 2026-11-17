@@ -73,7 +73,8 @@ class SessionExtras:
     killed_after: float | None = None
     wipe: WipeInfo | None = None
     image_mode: bool = False
-    disk_mb: int = 0
+    # `None` = sesión antigua que no midió el disco; `0` = sin disco de datos.
+    disk_mb: int | None = None
     process_io: ProcessIO | None = None
 
 
@@ -390,14 +391,22 @@ def _delta(before: int, after: int) -> str:
 
 
 def _guest_io_note(extras: SessionExtras) -> str:
-    """Lectura de las escrituras de una sesión con ventana, según haya disco.
+    """Lectura de las escrituras de una sesión con ventana, según el disco.
 
     Con `--disk 0` no hay ningún disco de datos escribible y se mantiene la
     frase de la especificación; con disco virtio no se puede afirmar que QEMU
-    no tenga dispositivo de bloque, así que se declara sin atribuir.
+    no tenga dispositivo de bloque, así que se declara sin atribuir. Si la
+    sesión no midió el disco (formato antiguo) tampoco se puede afirmar nada
+    sobre dispositivos de bloque.
     """
     assert extras.process_io is not None
     size = extras.process_io.write_bytes
+    if extras.disk_mb is None:
+        return (
+            f"I/O con GUI: {size} B; "
+            "el disco de datos no se midió en esta sesión, así que la escritura "
+            "no se puede atribuir solo al anfitrión"
+        )
     if extras.disk_mb > 0:
         return (
             f"I/O con GUI y disco de datos: {size} B; "
@@ -410,7 +419,7 @@ def _guest_io_note(extras: SessionExtras) -> str:
 
 
 def _process_io_lines(
-    io: ProcessIO | None, image_mode: bool, disk_mb: int
+    io: ProcessIO | None, image_mode: bool, disk_mb: int | None
 ) -> list[str]:
     """Sección de I/O: contadores crudos y la lectura que autoriza el veredicto."""
     if io is None:
@@ -627,10 +636,13 @@ def _extras_from_dict(raw: object, path: Path) -> SessionExtras:
         raise ValueError(
             f"El campo 'image_mode' de la sesión {path} debe ser verdadero o falso."
         )
-    disk_mb = raw.get("disk_mb", 0)
-    if not isinstance(disk_mb, int) or isinstance(disk_mb, bool) or disk_mb < 0:
+    disk_mb = raw.get("disk_mb")
+    if disk_mb is not None and (
+        not isinstance(disk_mb, int) or isinstance(disk_mb, bool) or disk_mb < 0
+    ):
         raise ValueError(
-            f"El campo 'disk_mb' de la sesión {path} debe ser un entero no negativo."
+            f"El campo 'disk_mb' de la sesión {path} debe ser un entero no "
+            "negativo o null."
         )
 
     process_io = _process_io_from_dict(raw.get("process_io"), path)
