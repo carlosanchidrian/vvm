@@ -367,7 +367,7 @@ def test_run_force_ignora_bloqueos(host_ok, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         cli.vm,
         "run_session",
-        lambda cmd, pass_fds=(): cli.vm.RunOutcome(returncode=0),
+        lambda cmd, pass_fds=(), **kwargs: cli.vm.RunOutcome(returncode=0),
     )
 
     assert cli.main(_run_args(kernel, initrd, "--force")) == 0
@@ -583,7 +583,9 @@ def test_run_image_prechequeo_y_linea_base_van_antes_de_copiar(
 
     monkeypatch.setattr(cli.images, "create_image_fd", copy)
     monkeypatch.setattr(
-        cli.vm, "run_session", lambda cmd, pass_fds=(): cli.vm.RunOutcome(0)
+        cli.vm,
+        "run_session",
+        lambda cmd, pass_fds=(), **kwargs: cli.vm.RunOutcome(0),
     )
 
     assert cli.main(["run", "--image", str(iso), "--disk", "0"]) == 0
@@ -616,7 +618,9 @@ def test_run_image_shmem_no_descuenta_el_iso(
 
     monkeypatch.setattr(cli.audit, "take_snapshot", snapshot)
     monkeypatch.setattr(
-        cli.vm, "run_session", lambda cmd, pass_fds=(): cli.vm.RunOutcome(0)
+        cli.vm,
+        "run_session",
+        lambda cmd, pass_fds=(), **kwargs: cli.vm.RunOutcome(0),
     )
 
     assert cli.main(["run", "--image", str(iso), "--disk", "0"]) == 0
@@ -859,6 +863,71 @@ def test_run_wipe_se_ejecuta_al_interrumpir(tmp_path):
     text = report.read_text(encoding="utf-8")
     assert "Cierre: SIGTERM" in text
     assert "Wipe: 8 MiB a cero en" in text
+
+
+def test_run_sigterm_durante_el_wipe_conserva_informe_y_sesion(tmp_path):
+    """Una señal en el teardown no aborta el wipe, el informe ni la sesión."""
+    kernel, initrd = _boot_files(tmp_path)
+    marker = tmp_path / "wipe.started"
+    report = tmp_path / "informe.txt"
+    wrapper = tmp_path / "cli_wipe_lento.py"
+    # El CLI corre en un subproceso: el wipe lento se inyecta en un envoltorio.
+    wrapper.write_text(
+        "import sys, time\n"
+        "from vvm import cli, images\n"
+        "real = images.wipe_fd\n"
+        "def slow(fd):\n"
+        f"    open({str(marker)!r}, 'w').close()\n"
+        "    time.sleep(0.5)\n"
+        "    return real(fd)\n"
+        "images.wipe_fd = slow\n"
+        "raise SystemExit(cli.main(sys.argv[1:]))\n",
+        encoding="utf-8",
+    )
+    env = _cli_env(tmp_path)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(wrapper),
+            "run",
+            "--kernel",
+            str(kernel),
+            "--initrd",
+            str(initrd),
+            "--qemu",
+            "/bin/true",
+            "--force",
+            "--disk",
+            "8",
+            "--wipe",
+            "--report",
+            str(report),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for(marker)
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=15)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+    assert proc.returncode == 143
+    assert report.is_file()
+    text = report.read_text(encoding="utf-8")
+    assert "Cierre: SIGTERM" in text
+    assert "Wipe: 8 MiB a cero en" in text
+    session = audit.load_session_full(tmp_path / "state" / "vvm" / "last-session.json")
+    assert session.extras.closure == "SIGTERM"
+    assert session.extras.wipe is not None
+    assert session.extras.wipe.disk_mb == 8
 
 
 # --- audit ---------------------------------------------------------------

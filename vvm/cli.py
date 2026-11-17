@@ -364,26 +364,38 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     disk_fd: int | None = None
     image_fd: int | None = None
+    # 5. Guard de señales instalado antes de la línea base y de `Popen`, y
+    # vigente durante todo el cierre (wipe, instantánea, informe y sesión).
+    guard = vm.SignalGuard()
     try:
-        # 5. Línea base limpia: antes de crear el disco y de copiar el ISO.
+        guard.install()
+    except (OSError, ValueError) as exc:
+        print(f"Error: no se pudo instalar el guard de señales: {exc}", file=sys.stderr)
+        return 1
+
+    exit_code = 0
+    qemu_interrupt: int | None = None
+    try:
+        # 6. Línea base limpia: antes de crear el disco y de copiar el ISO.
         before = audit.take_snapshot()
         extras = audit.SessionExtras(image_mode=bool(args.image))
-        # 6. Medios ya autorizados por el pre-chequeo. El disco disperso (`memfd`
+        # 7. Medios ya autorizados por el pre-chequeo. El disco disperso (`memfd`
         # + `ftruncate`) no ocupa RAM hasta que el guest escribe; el ISO sí se
         # copia entero.
         if args.disk > 0:
             disk_fd = images.create_disk_fd(args.disk)
         if args.image:
             image_fd = images.create_image_fd(args.image)
-        # 7. Línea real, con los descriptores de verdad.
+        # Línea real, con los descriptores de verdad.
         cmd = vm.build_cmd(config, disk_fd, qemu=args.qemu, image_fd=image_fd)
-        exit_code = 0
         try:
             pass_fds = [
                 fd for fd in (disk_fd, image_fd) if fd is not None
             ]
-            outcome = vm.run_session(cmd, pass_fds=pass_fds)
+            # 8. Sesión bajo el guard del llamador: `run_session` no lo restaura.
+            outcome = vm.run_session(cmd, pass_fds=pass_fds, guard=guard)
             exit_code = outcome.returncode
+            qemu_interrupt = outcome.interrupt
             extras = audit.SessionExtras(
                 closure=_closure_label(outcome.interrupt),
                 killed_after=outcome.killed_after,
@@ -392,6 +404,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
         except KeyboardInterrupt:
             exit_code = 130
+            qemu_interrupt = signal.SIGINT
             extras = audit.SessionExtras(
                 closure="Ctrl-C",
                 image_mode=bool(args.image),
@@ -401,7 +414,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         finally:
-            # El informe sale pase lo que pase: salida normal, Ctrl-C o señal.
+            # 9. El informe sale pase lo que pase: salida normal, Ctrl-C o
+            # señal. Durante el teardown el guard solo registra la señal; no
+            # aborta el wipe, la instantánea, el informe ni la sesión.
             # Orden deliberado: cerrar el ISO, borrar el disco si se pidió,
             # cerrar el disco y solo entonces medir. Si el disco siguiera
             # abierto, Shmem incluiría lo que el guest escribió y el «después»
@@ -421,6 +436,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 after = before
+            if guard.interrupt is not None:
+                # La señal llegó antes de construir el informe: se declara.
+                extras = replace(extras, closure=_closure_label(guard.interrupt))
             report_text = audit.build_report(
                 before,
                 after,
@@ -441,13 +459,19 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
             except (OSError, RuntimeError) as exc:
                 print(f"Aviso: no se pudo guardar la sesión: {exc}", file=sys.stderr)
-        return exit_code
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
         _close_fd(image_fd)
         _close_fd(disk_fd)
+        # 10. Restauración del guard al final del cierre.
+        guard.restore()
+
+    if qemu_interrupt is None and guard.interrupt is not None:
+        # Señal que no inició el cierre de QEMU (p. ej. durante el wipe).
+        exit_code = 128 + guard.interrupt
+    return exit_code
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
