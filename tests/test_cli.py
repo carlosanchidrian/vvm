@@ -1078,6 +1078,47 @@ def test_run_wipe_fallido_conserva_el_codigo_de_senal(
     assert "cierre quedó incompleto" not in captured.err
 
 
+def test_run_sigterm_durante_build_cmd_no_lanza_qemu(
+    host_ok, monkeypatch, tmp_path, capsys
+):
+    iso = _image(tmp_path)
+    session = tmp_path / "sesion.json"
+    report = tmp_path / "informe.txt"
+    _stub_session(monkeypatch, session)
+    real_build = cli.vm.build_cmd
+
+    def build_and_signal(*args, **kwargs):
+        cmd = real_build(*args, **kwargs)
+        image_fd = kwargs.get("image_fd")
+        # El pre-chequeo usa el descriptor simulado 0; el real es >= 3.
+        if isinstance(image_fd, int) and image_fd > 2:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return cmd
+
+    def boom(*args, **kwargs):
+        raise AssertionError("no debe lanzarse QEMU si la señal llegó antes")
+
+    monkeypatch.setattr(cli.vm, "build_cmd", build_and_signal)
+    monkeypatch.setattr(cli.vm, "run_session", boom)
+
+    code = cli.main(
+        [
+            "run",
+            "--image",
+            str(iso),
+            "--disk",
+            "8",
+            "--report",
+            str(report),
+        ]
+    )
+
+    assert code == 143
+    assert report.is_file()
+    assert "Cierre: SIGTERM" in report.read_text(encoding="utf-8")
+    assert audit.load_session_full(session).extras.closure == "SIGTERM"
+
+
 # --- audit ---------------------------------------------------------------
 
 

@@ -410,20 +410,27 @@ def cmd_run(args: argparse.Namespace) -> int:
                 cmd = vm.build_cmd(
                     config, disk_fd, qemu=args.qemu, image_fd=image_fd
                 )
-                pass_fds = [
-                    fd for fd in (disk_fd, image_fd) if fd is not None
-                ]
-                # 8. Sesión bajo el guard del llamador: `run_session` no lo restaura.
-                outcome = vm.run_session(cmd, pass_fds=pass_fds, guard=guard)
-                exit_code = outcome.returncode
-                qemu_interrupt = outcome.interrupt
-                extras = audit.SessionExtras(
-                    closure=_closure_label(outcome.interrupt),
-                    killed_after=outcome.killed_after,
-                    image_mode=bool(args.image),
-                    disk_mb=args.disk,
-                    process_io=outcome.process_io,
-                )
+                if guard.interrupt is not None:
+                    # La señal llegó mientras se construía la línea: QEMU no se
+                    # lanza, pero el cierre es el normal (cerrar, borrar e
+                    # informar) con el código de señal.
+                    exit_code = 128 + guard.interrupt
+                else:
+                    pass_fds = [
+                        fd for fd in (disk_fd, image_fd) if fd is not None
+                    ]
+                    # 8. Sesión bajo el guard del llamador: `run_session` no lo
+                    # restaura.
+                    outcome = vm.run_session(cmd, pass_fds=pass_fds, guard=guard)
+                    exit_code = outcome.returncode
+                    qemu_interrupt = outcome.interrupt
+                    extras = audit.SessionExtras(
+                        closure=_closure_label(outcome.interrupt),
+                        killed_after=outcome.killed_after,
+                        image_mode=bool(args.image),
+                        disk_mb=args.disk,
+                        process_io=outcome.process_io,
+                    )
         except KeyboardInterrupt:
             exit_code = 130
             qemu_interrupt = signal.SIGINT
