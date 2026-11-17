@@ -358,3 +358,141 @@ def test_has_blocking_detects_failure(readers):
     readers.setattr(host_check, "kvm_accessible", lambda: False)
 
     assert has_blocking(run_check(readers)) is True
+
+
+def test_p2_with_image_counts_the_iso_size(readers):
+    # 4096 RAM + 0 disco + 2304 ISO + 512 margen = 6912 MB.
+    readers.setattr(host_check, "read_meminfo", lambda: {"MemAvailable": 8000 * 1024})
+
+    p2 = result_of(
+        check_host(mem_mb=4096, disk_mb=0, cmd=GOOD_CMD, image_mb=2304),
+        "P2",
+    )
+
+    assert p2.status == "OK"
+    assert "necesario=6912 MB" in p2.evidence
+    assert "2304 imagen" in p2.evidence
+
+
+def test_p2_with_image_and_low_mem_only_warns(readers):
+    readers.setattr(host_check, "read_meminfo", lambda: {"MemAvailable": 8000 * 1024})
+
+    p2 = result_of(
+        check_host(mem_mb=1024, disk_mb=0, cmd=GOOD_CMD, image_mb=100),
+        "P2",
+    )
+
+    assert p2.status == "WARN"
+    assert p2.blocking is True
+    assert "aviso" in p2.evidence
+    assert "2048 MB" in p2.evidence
+
+
+def test_p2_with_image_and_2048_mem_is_ok(readers):
+    p2 = result_of(
+        check_host(mem_mb=2048, disk_mb=0, cmd=GOOD_CMD, image_mb=100),
+        "P2",
+    )
+
+    assert p2.status == "OK"
+
+
+def test_p2_without_image_does_not_warn_about_low_mem(readers):
+    p2 = result_of(run_check(readers, mem_mb=1024, disk_mb=0), "P2")
+
+    assert p2.status == "OK"
+    assert "aviso" not in p2.evidence
+
+
+def test_p9_placeholder_fd_is_ok_and_not_fd_zero(readers):
+    cmd = [
+        token.replace("file=/dev/fd/7", "file=/dev/fd/<fd>")
+        for token in GOOD_CMD
+    ]
+
+    p9 = result_of(run_check(readers, cmd=cmd), "P9")
+
+    assert p9.status == "OK"
+    assert "disco por fd: file=/dev/fd/<fd>" in p9.evidence
+    assert "/dev/fd/0" not in p9.evidence
+
+
+def test_p9_disk_zero_without_fd_is_ok(readers):
+    cmd = [
+        "qemu-system-x86_64",
+        "-object",
+        "memory-backend-memfd,id=mem,size=512M,share=off",
+        "-machine",
+        "q35,memory-backend=mem,dump-guest-core=off,mem-merge=off",
+    ]
+
+    p9 = result_of(run_check(readers, disk_mb=0, cmd=cmd), "P9")
+
+    assert p9.status == "OK"
+    assert "sin disco de datos" in p9.evidence
+
+
+def test_p9_disk_zero_with_image_fd_is_ok(readers):
+    cmd = [
+        "qemu-system-x86_64",
+        "-object",
+        "memory-backend-memfd,id=mem,size=512M,share=off",
+        "-drive",
+        "file=/dev/fd/9,format=raw,media=cdrom,readonly=on",
+    ]
+
+    p9 = result_of(run_check(readers, disk_mb=0, cmd=cmd), "P9")
+
+    assert p9.status == "OK"
+    assert "file=/dev/fd/9" in p9.evidence
+    assert "cdrom por fd" in p9.evidence
+    assert "sin disco de datos" in p9.evidence
+
+
+def _image_cmd(disk_drive: str | None) -> list[str]:
+    """Línea de modo imagen: cdrom por fd y, si toca, disco de datos."""
+    cmd = [
+        "qemu-system-x86_64",
+        "-object",
+        "memory-backend-memfd,id=mem,size=4096M,share=off",
+        "-machine",
+        "q35,memory-backend=mem,dump-guest-core=off,mem-merge=off",
+        "-drive",
+        "file=/dev/fd/9,format=raw,media=cdrom,readonly=on",
+        "-boot",
+        "d",
+    ]
+    if disk_drive is not None:
+        cmd += ["-drive", disk_drive]
+    return cmd
+
+
+def test_p9_image_cdrom_and_virtio_by_fd_is_ok_and_cites_virtio(readers):
+    cmd = _image_cmd("file=/dev/fd/7,format=raw,if=virtio,cache=writethrough")
+
+    p9 = result_of(run_check(readers, disk_mb=256, cmd=cmd), "P9")
+
+    assert p9.status == "OK"
+    assert "disco por fd: file=/dev/fd/7,format=raw,if=virtio" in p9.evidence
+    # La evidencia del disco de datos no puede ser la del cdrom.
+    assert "disco por fd: file=/dev/fd/9" not in p9.evidence
+
+
+def test_p9_image_virtio_by_path_fails_despite_cdrom_by_fd(readers):
+    cmd = _image_cmd("file=/tmp/disco.img,format=raw,if=virtio,cache=writethrough")
+
+    p9 = result_of(run_check(readers, disk_mb=256, cmd=cmd), "P9")
+
+    assert p9.status == "FAIL"
+    assert p9.blocking is True
+    assert "disco por fd: ausente" in p9.evidence
+    assert "/tmp/disco.img" in p9.evidence
+
+
+def test_p9_image_without_data_drive_fails_if_disk_requested(readers):
+    cmd = _image_cmd(None)
+
+    p9 = result_of(run_check(readers, disk_mb=256, cmd=cmd), "P9")
+
+    assert p9.status == "FAIL"
+    assert "disco por fd: ausente" in p9.evidence

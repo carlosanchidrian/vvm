@@ -23,6 +23,7 @@ def _snapshot(
     shm_entries: tuple[str, ...] = (),
     qemu_pids: tuple[str, ...] = (),
     taken_at: str = "2026-10-24T10:00:00Z",
+    memfds: tuple[str, ...] = (),
 ) -> audit.Snapshot:
     return audit.Snapshot(
         shmem_kb=shmem_kb,
@@ -30,6 +31,7 @@ def _snapshot(
         shm_entries=shm_entries,
         qemu_pids=qemu_pids,
         taken_at=taken_at,
+        memfds=memfds,
     )
 
 
@@ -100,6 +102,23 @@ def test_prechequeo_con_avisos_indica_el_resto_ok():
     assert "Resto: 1 comprobaciones OK." in report
     assert "Apto: las" not in report
     assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_aviso_de_p2_bajo_mem_no_se_etiqueta_como_bloqueante():
+    # P2 es bloqueante por tabla, pero en WARN (--mem < 2048) solo avisa.
+    p2 = _check(
+        "P2",
+        "Memoria RAM suficiente",
+        "WARN",
+        True,
+        "MemAvailable=8000 MB; necesario=1028 MB; aviso: --image con --mem 1024 MB",
+        "usa al menos --mem 2048",
+    )
+
+    report = audit.build_report(_snapshot(), _snapshot(), checks=(p2,), forced=False)
+
+    assert "P2 AVISO (no bloqueante) Memoria RAM suficiente:" in report
+    assert "P2 AVISO (bloqueante)" not in report
 
 
 def test_sesion_sin_prechequeo_carga_como_desconocida(tmp_path: Path):
@@ -260,6 +279,7 @@ def test_save_load_roundtrip(tmp_path: Path):
         shm_entries=("a", "b"),
         qemu_pids=("11", "12"),
         taken_at="2026-10-24T10:05:00Z",
+        memfds=("memfd:displaysurface",),
     )
     path = tmp_path / "estado" / "vvm" / "last-session.json"
 
@@ -315,6 +335,11 @@ def test_take_snapshot_compone_lectores(monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(audit, "list_shm_entries", lambda shm_dir=audit.SHM_PATH: ("x",))
     monkeypatch.setattr(audit, "live_qemu_pids", lambda proc_dir=audit.PROC_PATH: ("777",))
+    monkeypatch.setattr(
+        audit,
+        "list_memfd_names",
+        lambda proc_dir=audit.PROC_PATH: ("memfd:displaysurface",),
+    )
 
     snapshot = audit.take_snapshot()
 
@@ -322,7 +347,113 @@ def test_take_snapshot_compone_lectores(monkeypatch: pytest.MonkeyPatch):
     assert snapshot.mem_available_kb == 5678
     assert snapshot.shm_entries == ("x",)
     assert snapshot.qemu_pids == ("777",)
+    assert snapshot.memfds == ("memfd:displaysurface",)
     assert snapshot.taken_at.endswith("Z")
+
+
+def _fake_memfd(proc: Path, pid: str, fd: str, target: str) -> None:
+    fd_dir = proc / pid / "fd"
+    fd_dir.mkdir(parents=True, exist_ok=True)
+    (fd_dir / fd).symlink_to(target)
+
+
+def test_list_memfd_names_lee_enlaces_y_normaliza_deleted(tmp_path: Path):
+    _fake_memfd(tmp_path, "100", "3", "/memfd:displaysurface (deleted)")
+    _fake_memfd(tmp_path, "100", "4", "/memfd:wayland-cursor (deleted)")
+    _fake_memfd(tmp_path, "200", "5", "/memfd:pulseaudio")
+    _fake_memfd(tmp_path, "200", "6", "/home/ejemplo/fichero")
+
+    assert audit.list_memfd_names(tmp_path) == (
+        "memfd:displaysurface",
+        "memfd:pulseaudio",
+        "memfd:wayland-cursor",
+    )
+
+
+def test_list_memfd_names_ignora_ficheros_regulares_con_memfd_en_el_nombre(
+    tmp_path: Path,
+):
+    regular = tmp_path / "memfd:regular"
+    regular.write_bytes(b"")
+    _fake_memfd(tmp_path, "100", "3", str(regular))
+    _fake_memfd(tmp_path, "100", "4", f"{regular} (deleted)")
+    _fake_memfd(tmp_path, "100", "5", "/memfd:displaysurface")
+
+    assert audit.list_memfd_names(tmp_path) == ("memfd:displaysurface",)
+
+
+def test_memfds_de_la_pila_del_anfitrion_no_son_hallazgo():
+    before = _snapshot()
+    after = _snapshot(
+        taken_at="2026-10-24T10:05:00Z",
+        memfds=(
+            "memfd:displaysurface",
+            "memfd:wayland-cursor",
+            "memfd:pulseaudio",
+        ),
+    )
+
+    report = audit.build_report(before, after)
+
+    assert "Memfds nuevos de la pila del anfitrión (no del guest): " in report
+    assert "memfd:displaysurface" in report
+    assert "Memfds nuevos fuera de esa pila: ninguno" in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_memfd_nuevo_fuera_de_la_pila_es_hallazgo():
+    before = _snapshot()
+    after = _snapshot(
+        taken_at="2026-10-24T10:05:00Z",
+        memfds=("memfd:displaysurface", "memfd:desconocido"),
+    )
+
+    report = audit.build_report(before, after)
+
+    assert "memfd:displaysurface" in report
+    assert _last_line(report) == (
+        "HALLAZGOS: memfd nuevo fuera de la pila del anfitrión: memfd:desconocido"
+    )
+
+
+def test_sesion_antigua_sin_memfds_dice_no_medido(tmp_path: Path):
+    path = tmp_path / "antigua.json"
+    bloque = asdict(_snapshot())
+    bloque.pop("memfds")
+    path.write_text(
+        json.dumps({"before": bloque, "after": bloque}),
+        encoding="utf-8",
+    )
+
+    session = audit.load_session_full(path)
+
+    assert session.before.memfds is None
+    assert session.after.memfds is None
+    report = audit.build_report(session.before, session.after)
+    assert "no medido en esta sesión" in report
+    assert "Memfds nuevos fuera de esa pila: ninguno" not in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_memfds_vacios_medidos_se_informan_como_ninguno():
+    before = _snapshot(memfds=())
+    after = _snapshot(memfds=(), taken_at="2026-10-24T10:05:00Z")
+
+    report = audit.build_report(before, after)
+
+    assert "Memfds nuevos fuera de esa pila: ninguno" in report
+    assert "no medido" not in report
+
+
+def test_save_load_conserva_memfds_no_medidos(tmp_path: Path):
+    path = tmp_path / "sesion.json"
+
+    audit.save_session(path, _snapshot(memfds=None), _snapshot(memfds=None))
+
+    before, after = audit.load_session(path)
+    assert before.memfds is None
+    assert after.memfds is None
+    assert json.loads(path.read_text(encoding="utf-8"))["before"]["memfds"] is None
 
 
 def test_list_shm_entries_solo_lee(tmp_path: Path):

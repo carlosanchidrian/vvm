@@ -29,6 +29,9 @@ SHMEM_ENABLED_PATH = "/sys/kernel/mm/transparent_hugepage/shmem_enabled"
 # Margen de MB que P2 suma a --mem y --disk antes de comparar con MemAvailable.
 RAM_MARGIN_MB = 512
 
+# Con --image la pantalla está siempre abierta; por debajo de esto solo se avisa.
+IMAGE_MIN_MEM_MB = 2048
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -125,7 +128,12 @@ _P1 = _Spec(
     True,
     'Instala qemu-kvm y añade tu usuario al grupo kvm: sudo apt install qemu-kvm && sudo usermod -aG kvm "$USER"',
 )
-_P2 = _Spec("P2", "Memoria RAM suficiente", True, "Cierra aplicaciones o reduce --mem y --disk.")
+_P2 = _Spec(
+    "P2",
+    "Memoria RAM suficiente",
+    True,
+    "Cierra aplicaciones o reduce --mem y --disk; con --image usa al menos --mem 2048.",
+)
 _P3 = _Spec("P3", "Sin swap activa", True, "Desactiva la swap: sudo swapoff -a.")
 _P4 = _Spec("P4", "Hibernación desactivada", False, "Enmascara la hibernación: sudo systemctl mask hibernate.target.")
 _P5 = _Spec(
@@ -186,13 +194,32 @@ def _find_token(cmd: Sequence[str], needle: str) -> str | None:
     return None
 
 
-_FD_DISK = re.compile(r"file=/dev/fd/\d+")
+_FD_DISK = re.compile(r"file=/dev/fd/(?:\d+|<fd>)")
 
 
-def _find_fd_disk(cmd: Sequence[str]) -> str | None:
-    """Token que pasa el disco como descriptor heredado (`file=/dev/fd/N`)."""
-    for token in cmd:
-        if _FD_DISK.search(token):
+def _drive_tokens(cmd: Sequence[str]) -> list[str]:
+    """Valores de los `-drive` de la línea de QEMU."""
+    return [
+        cmd[index + 1]
+        for index, token in enumerate(cmd)
+        if token == "-drive" and index + 1 < len(cmd)
+    ]
+
+
+def _find_cdrom_drive(cmd: Sequence[str]) -> str | None:
+    """Token `-drive` del medio óptico (el ISO, en modo imagen)."""
+    for token in _drive_tokens(cmd):
+        if "media=cdrom" in token:
+            return token
+    return None
+
+
+def _find_data_drive(cmd: Sequence[str]) -> str | None:
+    """Token `-drive` del disco de datos: el virtio, nunca el cdrom del ISO."""
+    for token in _drive_tokens(cmd):
+        if "media=cdrom" in token:
+            continue
+        if "if=virtio" in token:
             return token
     return None
 
@@ -219,9 +246,9 @@ def _check_p1() -> CheckResult:
     )
 
 
-def _check_p2(mem_mb: int, disk_mb: int) -> CheckResult:
+def _check_p2(mem_mb: int, disk_mb: int, image_mb: int = 0) -> CheckResult:
     meminfo = read_meminfo()
-    needed_mb = mem_mb + disk_mb + RAM_MARGIN_MB
+    needed_mb = mem_mb + disk_mb + image_mb + RAM_MARGIN_MB
     available_kb = meminfo.get("MemAvailable")
     if available_kb is None:
         return _result(
@@ -229,11 +256,26 @@ def _check_p2(mem_mb: int, disk_mb: int) -> CheckResult:
             "FAIL",
             f"MemAvailable ausente en {MEMINFO_PATH}: {meminfo or 'vacío'}",
         )
+    if image_mb:
+        breakdown = (
+            f"{mem_mb} + {disk_mb} + {image_mb} imagen + {RAM_MARGIN_MB}"
+        )
+    else:
+        breakdown = f"{mem_mb} + {disk_mb} + {RAM_MARGIN_MB}"
     evidence = (
         f"MemAvailable={available_kb} kB ({available_kb // 1024} MB); "
-        f"necesario={needed_mb} MB ({mem_mb} + {disk_mb} + {RAM_MARGIN_MB})"
+        f"necesario={needed_mb} MB ({breakdown})"
     )
-    status: Status = "OK" if available_kb >= needed_mb * 1024 else "FAIL"
+    if available_kb < needed_mb * 1024:
+        status: Status = "FAIL"
+    elif image_mb and mem_mb < IMAGE_MIN_MEM_MB:
+        status = "WARN"
+        evidence += (
+            f"; aviso: --image con --mem {mem_mb} MB puede quedarse corto "
+            f"(recomendado: {IMAGE_MIN_MEM_MB} MB o más)"
+        )
+    else:
+        status = "OK"
     return _result(_P2, status, evidence)
 
 
@@ -286,15 +328,35 @@ def _check_p8() -> CheckResult:
     return _result(_P8, "OK", f"sin restos vvm-* en {SHM_DIR}")
 
 
-def _check_p9(cmd: Sequence[str]) -> CheckResult:
+def _check_p9(cmd: Sequence[str], disk_mb: int) -> CheckResult:
+    """Anonimato del backend y del disco de datos.
+
+    En modo imagen el primer `file=/dev/fd/N` de la línea es el cdrom del ISO,
+    no el disco de datos: el disco se localiza por `if=virtio`. Si `--disk 0`
+    no hay disco de datos que comprobar y se dice explícitamente.
+    """
     share = _find_token(cmd, "share=off")
-    fd_disk = _find_fd_disk(cmd)
-    evidence = (
-        f"share=off: {share or 'ausente'}; "
-        f"disco por fd: {fd_disk or 'ausente'}"
-    )
-    status: Status = "OK" if share is not None and fd_disk is not None else "FAIL"
-    return _result(_P9, status, evidence)
+    parts = [f"share=off: {share or 'ausente'}"]
+
+    cdrom = _find_cdrom_drive(cmd)
+    if cdrom is not None and _FD_DISK.search(cdrom):
+        parts.append(f"cdrom por fd: {cdrom}")
+
+    if disk_mb == 0:
+        parts.append("sin disco de datos")
+        status: Status = "OK" if share is not None else "FAIL"
+        return _result(_P9, status, "; ".join(parts))
+
+    drive = _find_data_drive(cmd)
+    by_fd = drive is not None and _FD_DISK.search(drive) is not None
+    if by_fd:
+        parts.append(f"disco por fd: {drive}")
+    elif drive is None:
+        parts.append("disco por fd: ausente")
+    else:
+        parts.append(f"disco por fd: ausente (disco de datos por ruta: {drive})")
+    status = "OK" if share is not None and by_fd else "FAIL"
+    return _result(_P9, status, "; ".join(parts))
 
 
 def _check_p10() -> CheckResult:
@@ -305,25 +367,33 @@ def _check_p10() -> CheckResult:
     return _result(_P10, status, evidence)
 
 
-def check_host(mem_mb: int, disk_mb: int, cmd: Sequence[str]) -> list[CheckResult]:
+def check_host(
+    mem_mb: int,
+    disk_mb: int,
+    cmd: Sequence[str],
+    *,
+    image_mb: int = 0,
+) -> list[CheckResult]:
     """Ejecuta P1-P10 y devuelve los resultados.
 
     `cmd` es la línea de QEMU ya construida; P7 y P9 la inspeccionan para
-    comprobar `dump-guest-core=off` y `share=off` + disco por fd.
+    comprobar `dump-guest-core=off` y `share=off` + disco por fd. `image_mb` es
+    el tamaño del ISO redondeado a MiB: P2 lo cuenta porque el medio se queda
+    entero en RAM.
 
     Si un lector falla (fichero ausente o sin permiso), la comprobación queda en
     FALLA si es bloqueante y en aviso si no, citando la causa cruda.
     """
     checks: list[tuple[_Spec, Callable[[], CheckResult]]] = [
         (_P1, _check_p1),
-        (_P2, lambda: _check_p2(mem_mb, disk_mb)),
+        (_P2, lambda: _check_p2(mem_mb, disk_mb, image_mb)),
         (_P3, _check_p3),
         (_P4, _check_p4),
         (_P5, _check_p5),
         (_P6, _check_p6),
         (_P7, lambda: _check_p7(cmd)),
         (_P8, _check_p8),
-        (_P9, lambda: _check_p9(cmd)),
+        (_P9, lambda: _check_p9(cmd, disk_mb)),
         (_P10, _check_p10),
     ]
     results: list[CheckResult] = []
