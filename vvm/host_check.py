@@ -194,7 +194,7 @@ def _find_token(cmd: Sequence[str], needle: str) -> str | None:
     return None
 
 
-_FD_DISK = re.compile(r"file=/dev/fd/\d+")
+_FD_DISK = re.compile(r"file=/dev/fd/(?:\d+|<fd>)")
 
 
 def _drive_tokens(cmd: Sequence[str]) -> list[str]:

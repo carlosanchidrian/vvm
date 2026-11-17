@@ -146,7 +146,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     mem_mb=args.mem,
                     disk_mb=args.disk,
                 ),
-                disk_fd=0 if args.disk > 0 else None,
+                disk_fd=_PLACEHOLDER_FD if args.disk > 0 else None,
                 image_fd=_PLACEHOLDER_FD,
             )
         else:
@@ -157,7 +157,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     mem_mb=args.mem,
                     disk_mb=args.disk,
                 ),
-                disk_fd=0 if args.disk > 0 else None,
+                disk_fd=_PLACEHOLDER_FD if args.disk > 0 else None,
             )
     except (OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -329,9 +329,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         precheck_cmd = vm.build_cmd(
             config,
-            0 if args.disk > 0 else None,
+            _PLACEHOLDER_FD if args.disk > 0 else None,
             qemu=args.qemu,
-            image_fd=0 if args.image else None,
+            image_fd=_PLACEHOLDER_FD if args.image else None,
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

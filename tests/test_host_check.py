@@ -404,6 +404,19 @@ def test_p2_without_image_does_not_warn_about_low_mem(readers):
     assert "aviso" not in p2.evidence
 
 
+def test_p9_placeholder_fd_is_ok_and_not_fd_zero(readers):
+    cmd = [
+        token.replace("file=/dev/fd/7", "file=/dev/fd/<fd>")
+        for token in GOOD_CMD
+    ]
+
+    p9 = result_of(run_check(readers, cmd=cmd), "P9")
+
+    assert p9.status == "OK"
+    assert "disco por fd: file=/dev/fd/<fd>" in p9.evidence
+    assert "/dev/fd/0" not in p9.evidence
+
+
 def test_p9_disk_zero_without_fd_is_ok(readers):
     cmd = [
         "qemu-system-x86_64",
