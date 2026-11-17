@@ -43,7 +43,7 @@ identificador interno por comprobación.
 ```bash
 python3 -m vvm run \
   (--image live.iso | --kernel vmlinuz-virt --initrd initramfs-virt) \
-  [--mem 512] [--disk 256] [--cpus 1] \
+  [--mem 512] [--disk 256] [--cpus 1] [--wipe] \
   [--headless --log /tmp/vvm-serial.log] \
   [--report informe.txt] [--qemu qemu-system-x86_64] \
   [--dry-run] [--force]
@@ -68,9 +68,10 @@ Secuencia:
    arranca (`--force` los ignora).
 5. Toma la línea base (Shmem, MemAvailable, `/dev/shm`, memfds y QEMU vivos).
 6. Lanza QEMU heredando los fds del disco y del ISO.
-7. Al salir —normal, error o Ctrl-C— cierra los fds, imprime el informe (con el
-   pre-chequeo en la sección 0) y guarda la sesión en
-   `$XDG_STATE_HOME/vvm/last-session.json` (por defecto
+7. Al salir —normal, error, Ctrl-C, SIGTERM o SIGHUP— cierra el ISO, borra el
+   disco si se pidió `--wipe`, cierra el disco, toma la instantánea final,
+   imprime el informe (con el pre-chequeo en la sección 0) y guarda la sesión
+   en `$XDG_STATE_HOME/vvm/last-session.json` (por defecto
    `~/.local/state/vvm/last-session.json`).
 
 Detalles:
@@ -78,10 +79,16 @@ Detalles:
 - `--dry-run` imprime la línea final con `<fd>` en lugar del descriptor, no lee
   el ISO y no ejecuta QEMU ni el pre-chequeo.
 - `--disk 0` desactiva el disco de datos, lo habitual con un live.
+- `--wipe` sobrescribe con ceros el disco de datos antes de cerrarlo, también si
+  la sesión se interrumpe. Con `--disk 0` no es un error: el informe declara
+  «sin disco de datos». El ISO no se borra: se libera al cerrar su `memfd`.
 - `--headless` exige `--log` y solo vale para `--kernel/--initrd`: sin fichero
   de salida se perdería la consola del guest.
 - `--report RUTA` escribe el informe en un fichero en vez de por pantalla
   (crea el directorio si falta).
+- Ctrl-C, SIGTERM y SIGHUP cierran la sesión de forma ordenada: se reenvía
+  SIGTERM a QEMU, se espera hasta 5 s y, si no atiende, se le manda SIGKILL (el
+  informe lo declara). El CLI sale con 130, 143 o 129 respectivamente.
 - Para salir de una sesión interactiva: **Ctrl-A x**.
 
 ### `vvm audit` — informe de una sesión
@@ -95,10 +102,13 @@ determinista: pre-chequeo de la sesión (sección 0), entradas nuevas en `/dev/s
 memfds nuevos comparados con la línea base —los del escritorio
 (`displaysurface`, `wayland-cursor`, `pulseaudio`) se declaran como pila del
 anfitrión, no del guest—, procesos QEMU de esa sesión vivos al cierre, deltas de
-Shmem/MemAvailable, log serie declarado y las exclusiones de alcance. Si se arrancó con `--force` y había
-fallos bloqueantes, el veredicto lo dice. La ruta del log no se persiste en la
-sesión, así que al reconstruir el informe desde `audit` la sección del log sale
-vacía.
+Shmem/MemAvailable, contadores de I/O de QEMU leídos con la VM viva, cierre y
+resultado de `--wipe`, log serie declarado y las exclusiones de alcance. En una
+sesión con ventana, si `write_bytes` no es cero el informe lo declara como I/O
+del anfitrión con GUI, nunca como acceso a bloque del guest; en modo kernel,
+`write_bytes=0` es el testigo. Si se arrancó con `--force` y había fallos
+bloqueantes, el veredicto lo dice. La ruta del log no se persiste en la sesión,
+así que al reconstruir el informe desde `audit` la sección del log sale vacía.
 
 ## Qué garantiza la línea de QEMU
 
@@ -122,6 +132,9 @@ vacía.
 - La herramienta no ejecuta `sudo`: si `vvm check` pide `swapoff`, lo propone y
   eres tú quien decide.
 - No crea ni borra entradas de `/dev/shm` ajenas.
+- `--wipe` borra el disco de datos, no la RAM del guest (su `memfd` es de QEMU y
+  muere con él; la remanencia DRAM queda fuera del modelo de amenaza) ni el ISO
+  (copia de una imagen pública que se libera al cerrar).
 - La IA no interviene en la ejecución: los veredictos los calcula el código.
 
 ## Desarrollo
@@ -142,5 +155,5 @@ vvm/
 ├── audit.py        # snapshots, informe y sesión en JSON
 ├── cli.py          # argparse: check | run | audit
 └── __main__.py     # python3 -m vvm
-tests/              # 126 tests, sin KVM
+tests/              # 147 tests, sin KVM
 ```

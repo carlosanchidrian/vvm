@@ -290,6 +290,26 @@ def test_run_session_forwards_sigterm_and_returns_143(tmp_path: Path):
         os.kill(child, 0)
 
 
+def test_run_session_forwards_sighup_and_returns_129(tmp_path: Path):
+    marker = tmp_path / "started"
+    script = _fake_qemu(
+        tmp_path,
+        (
+            "sleep 0.2\n"
+            f"echo $$ > {marker}\n"
+            "trap 'exit 0' TERM\n"
+            "while :; do sleep 0.05; done\n"
+        ),
+    )
+    sender = _signal_when_ready(marker, signal.SIGHUP)
+
+    outcome = run_session([str(script)], term_wait=1.0, io_poll=0.01)
+    sender.join()
+
+    assert outcome.returncode == 129
+    assert outcome.interrupt == signal.SIGHUP
+
+
 def test_run_session_kills_child_that_ignores_sigterm(tmp_path: Path):
     marker = tmp_path / "started"
     script = _fake_qemu(
