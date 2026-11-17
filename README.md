@@ -68,12 +68,14 @@ Secuencia:
 4. Crea el disco del guest en un `memfd` (256 MiB por defecto; `--disk 0` lo
    desactiva) y, con `--image`, copia el ISO a otro `memfd`.
 5. Construye la línea de QEMU definitiva con los descriptores reales.
-6. Lanza QEMU heredando los fds del disco y del ISO.
+6. Instala el guard de señales (SIGTERM, SIGHUP y SIGINT) y lanza QEMU
+   heredando los fds del disco y del ISO.
 7. Al salir —normal, error, Ctrl-C, SIGTERM o SIGHUP— cierra el ISO, borra el
    disco si se pidió `--wipe`, cierra el disco, toma la instantánea final,
    imprime el informe (con el pre-chequeo en la sección 0) y guarda la sesión
    en `$XDG_STATE_HOME/vvm/last-session.json` (por defecto
    `~/.local/state/vvm/last-session.json`).
+8. Restaura los manejadores de señal.
 
 El orden importa: el ISO se copia entero en RAM, así que P2 mide la memoria que
 hay de verdad antes de esa copia, y la línea base se toma antes de que el
@@ -99,6 +101,13 @@ Detalles:
 - Ctrl-C, SIGTERM y SIGHUP cierran la sesión de forma ordenada: se reenvía
   SIGTERM a QEMU, se espera hasta 5 s y, si no atiende, se le manda SIGKILL (el
   informe lo declara). El CLI sale con 130, 143 o 129 respectivamente.
+- Las señales cubren todo el ciclo, no solo la vida de QEMU: durante el
+  teardown (wipe, instantánea final, informe y guardado) solo se registran y el
+  cierre termina; una señal que no inició el cierre sale como `128+señal` y el
+  informe dice `Cierre: SIGTERM`, `SIGHUP` o `Ctrl-C` si llegó antes de
+  construirlo. Si ya no consta cómo cerró la sesión (por ejemplo, un fallo
+  antes de lanzar QEMU o una sesión antigua), el informe dice
+  `Cierre: desconocido`.
 - Para salir de una sesión interactiva: **Ctrl-A x**.
 
 ### `vvm audit` — informe de una sesión
@@ -167,5 +176,5 @@ vvm/
 ├── audit.py        # snapshots, informe y sesión en JSON
 ├── cli.py          # argparse: check | run | audit
 └── __main__.py     # python3 -m vvm
-tests/              # 166 tests, sin KVM
+tests/              # 183 tests, sin KVM
 ```

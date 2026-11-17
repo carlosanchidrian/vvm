@@ -478,3 +478,12 @@ def test_signal_guard_forwards_signal_recorded_before_attach(tmp_path: Path):
             proc.kill()
             proc.wait()
         guard.restore()
+
+
+def test_run_session_restores_handlers_when_the_guard_is_its_own():
+    before = signal.getsignal(signal.SIGTERM)
+
+    outcome = run_session(["/bin/true"], io_poll=0.01)
+
+    assert outcome.returncode == 0
+    assert signal.getsignal(signal.SIGTERM) is before

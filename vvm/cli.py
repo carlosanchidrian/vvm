@@ -5,11 +5,13 @@ a `sys.exit()` (eso lo hace `__main__.py`).
 
 Orden de `run`, deliberado: validar la fuente de arranque y el tamaño del ISO
 (solo `stat`) → pre-chequeo con una línea de descriptores simulados → línea base
-→ crear/copiar los medios → línea real con los fds. P7 y P9 solo inspeccionan la
-forma de la línea, así que el pre-chequeo puede ejecutarse antes de que exista
-ningún descriptor: así P2 mide la memoria que hay de verdad y el ISO no se copia
-si el anfitrión no es apto. La línea base se toma antes de crear los medios para
-que el delta de Shmem no descuente el propio ISO de la herramienta.
+→ crear/copiar los medios → línea real con los fds → guard de señales y sesión.
+P7 y P9 solo inspeccionan la forma de la línea, así que el pre-chequeo puede
+ejecutarse antes de que exista ningún descriptor: así P2 mide la memoria que hay
+de verdad y el ISO no se copia si el anfitrión no es apto. La línea base se toma
+antes de crear los medios para que el delta de Shmem no descuente el propio ISO
+de la herramienta. El guard se instala antes de `Popen` y sigue vigente durante
+todo el teardown: una señal en el cierre no impide el informe ni la sesión.
 """
 
 from __future__ import annotations
