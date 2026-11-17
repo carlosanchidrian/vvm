@@ -316,7 +316,7 @@ def build_report(
     lines = [
         "Informe de sesión VVM (determinista, sin IA)",
         f"Línea base: {before.taken_at}",
-        f"Cierre:     {after.taken_at}",
+        f"Instantánea final: {after.taken_at}",
         "",
         *_precheck_lines(checks, forced),
         "",

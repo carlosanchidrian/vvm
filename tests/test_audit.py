@@ -263,6 +263,20 @@ def test_deltas_de_memoria_con_signo():
     assert "MemAvailable: antes 4000000 kB, después 3999000 kB, delta -1000 kB" in report
 
 
+def test_cabecera_instantanea_final_no_se_confunde_con_cierre():
+    before = _snapshot(taken_at="2026-10-24T10:00:00Z")
+    after = _snapshot(taken_at="2026-10-24T10:05:00Z")
+
+    report = audit.build_report(before, after)
+    lines = report.splitlines()
+    cierres = [line for line in lines if line.strip().startswith("Cierre:")]
+    instantaneas = [line for line in lines if line.startswith("Instantánea final:")]
+
+    assert len(cierres) == 1
+    assert len(instantaneas) == 1
+    assert instantaneas[0] == "Instantánea final: 2026-10-24T10:05:00Z"
+
+
 def test_informe_es_determinista():
     before = _snapshot(shm_entries=("b", "a"))
     after = _snapshot(shm_entries=("a", "b", "c"), qemu_pids=("99", "100"))
