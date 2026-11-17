@@ -642,6 +642,24 @@ def test_check_image_inexistente_sale_2(tmp_path, capsys):
     assert "--image no encontrada" in capsys.readouterr().err
 
 
+def test_check_no_emite_el_marcador_dev_fd_cero(host_ok, capsys):
+    assert cli.main(["check"]) == 0
+
+    out = capsys.readouterr().out
+    assert "/dev/fd/0" not in out
+    assert "file=/dev/fd/<fd>" in out
+
+
+def test_check_image_no_emite_el_marcador_dev_fd_cero(host_ok, tmp_path, capsys):
+    iso = _image(tmp_path)
+
+    assert cli.main(["check", "--image", str(iso)]) == 0
+
+    out = capsys.readouterr().out
+    assert "/dev/fd/0" not in out
+    assert "file=/dev/fd/<fd>" in out
+
+
 # --- audit ---------------------------------------------------------------
 
 
