@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from vvm import audit, cli, host_check, images
+from vvm.vm import ProcessIO
 
 SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
 SWAP_ACTIVE = SWAPS_HEADER + "/swap.img file 8388604 0 -2\n"
@@ -80,6 +81,11 @@ def _stub_session(monkeypatch: pytest.MonkeyPatch, session: Path) -> None:
     monkeypatch.setattr(cli.audit, "take_snapshot", lambda: _snapshot())
 
 
+# Bucle acotado (~20 s) para que un fake que no atiende la señal no cuelgue la
+# suite indefinidamente.
+_FAKE_LOOP = "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
+
+
 def _fake_qemu(tmp_path: Path, body: str) -> Path:
     script = tmp_path / "fake-qemu"
     script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
@@ -93,6 +99,18 @@ def _wait_for(path: Path, timeout: float = 5.0) -> None:
         if time.monotonic() > deadline:
             raise AssertionError(f"no apareció {path}")
         time.sleep(0.02)
+
+
+def _kill_marked_child(marker: Path) -> None:
+    """Mata el QEMU falso del marcador si el CLI falló antes de reapearlo."""
+    try:
+        child = int(marker.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    try:
+        os.kill(child, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def _cli_env(tmp_path: Path) -> dict[str, str]:
@@ -744,7 +762,7 @@ def test_run_sigterm_sale_143_y_no_deja_hijo(tmp_path):
             "sleep 0.3\n"
             f"echo $$ > {marker}\n"
             "trap 'exit 0' TERM\n"
-            "while :; do sleep 0.05; done\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
         ),
     )
     report = tmp_path / "informe.txt"
@@ -766,6 +784,7 @@ def test_run_sigterm_sale_143_y_no_deja_hijo(tmp_path):
         if proc.poll() is None:
             proc.kill()
             proc.communicate()
+        _kill_marked_child(marker)
 
     assert proc.returncode == 143
     assert report.is_file()
@@ -789,7 +808,7 @@ def test_run_sigterm_ignorado_mata_con_sigkill_y_lo_declara(
             "sleep 0.3\n"
             f"echo $$ > {marker}\n"
             "trap '' TERM\n"
-            "while :; do sleep 0.05; done\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
         ),
     )
     monkeypatch.setattr(cli.vm, "TERM_WAIT_SECONDS", 0.2)
@@ -830,7 +849,7 @@ def test_run_wipe_se_ejecuta_al_interrumpir(tmp_path):
             "sleep 0.3\n"
             f"echo $$ > {marker}\n"
             "trap 'exit 0' TERM\n"
-            "while :; do sleep 0.05; done\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
         ),
     )
     report = tmp_path / "informe.txt"
@@ -859,6 +878,7 @@ def test_run_wipe_se_ejecuta_al_interrumpir(tmp_path):
         if proc.poll() is None:
             proc.kill()
             proc.communicate()
+        _kill_marked_child(marker)
 
     assert proc.returncode == 143
     text = report.read_text(encoding="utf-8")
@@ -919,6 +939,7 @@ def test_run_sigterm_durante_el_wipe_conserva_informe_y_sesion(tmp_path):
         if proc.poll() is None:
             proc.kill()
             proc.communicate()
+        _kill_marked_child(marker)
 
     assert proc.returncode == 143
     assert report.is_file()
@@ -1020,6 +1041,28 @@ def test_audit_reproduce_el_informe_byte_a_byte(
     texto = report.read_text(encoding="utf-8")
     assert capsys.readouterr().out == texto
     assert texto.endswith("\n") and not texto.endswith("\n\n")
+
+
+def test_audit_reconstruye_cierre_io_y_wipe(tmp_path, capsys):
+    session = tmp_path / "sesion.json"
+    extras = audit.SessionExtras(
+        closure="SIGTERM",
+        killed_after=5.0,
+        wipe=audit.WipeInfo(requested=True, disk_mb=8, seconds=0.01),
+        image_mode=True,
+        disk_mb=256,
+        process_io=ProcessIO(rchar=10, wchar=20, read_bytes=30, write_bytes=40),
+    )
+    audit.save_session(session, _snapshot(), _snapshot(), extras=extras)
+
+    assert cli.main(["audit", "--session", str(session)]) == 0
+
+    out = capsys.readouterr().out
+    assert "Cierre: SIGTERM" in out
+    assert "SIGKILL a los 5 s" in out
+    assert "write_bytes: 40 B" in out
+    assert "I/O con GUI y disco de datos: 40 B" in out
+    assert "Wipe: 8 MiB a cero en 0.010 s" in out
 
 
 def test_audit_usa_la_sesion_por_defecto(monkeypatch, tmp_path, capsys):

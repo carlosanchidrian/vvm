@@ -217,6 +217,11 @@ def test_build_cmd_accepts_placeholder_for_dry_run():
     assert "file=/dev/fd/<fd>,format=raw,if=virtio,cache=writethrough" in cmd
 
 
+# Bucle acotado (~20 s) para que un fake que nunca recibe la señal no cuelgue
+# la suite indefinidamente.
+_FAKE_LOOP = "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
+
+
 def _fake_qemu(tmp_path: Path, body: str) -> Path:
     script = tmp_path / "fake-qemu"
     script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
@@ -276,7 +281,7 @@ def test_run_session_forwards_sigterm_and_returns_143(tmp_path: Path):
             "sleep 0.2\n"
             f"echo $$ > {marker}\n"
             "trap 'exit 0' TERM\n"
-            "while :; do sleep 0.05; done\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
         ),
     )
     sender = _signal_when_ready(marker)
@@ -300,7 +305,7 @@ def test_run_session_forwards_sighup_and_returns_129(tmp_path: Path):
             "sleep 0.2\n"
             f"echo $$ > {marker}\n"
             "trap 'exit 0' TERM\n"
-            "while :; do sleep 0.05; done\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
         ),
     )
     sender = _signal_when_ready(marker, signal.SIGHUP)
@@ -320,7 +325,7 @@ def test_run_session_kills_child_that_ignores_sigterm(tmp_path: Path):
             "sleep 0.2\n"
             f"echo $$ > {marker}\n"
             "trap '' TERM\n"
-            "while :; do sleep 0.05; done\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
         ),
     )
     sender = _signal_when_ready(marker)
@@ -360,7 +365,7 @@ def test_run_session_sigint_returns_130_and_leaves_no_child(tmp_path: Path):
             "sleep 0.2\n"
             f"echo $$ > {marker}\n"
             "trap 'exit 0' TERM\n"
-            "while :; do sleep 0.05; done\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
         ),
     )
     sender = _signal_when_ready(marker, signal.SIGINT)
@@ -383,7 +388,7 @@ def test_run_session_second_signal_measures_time_from_the_first(tmp_path: Path):
             "sleep 0.2\n"
             f"echo $$ > {marker}\n"
             "trap '' TERM\n"
-            "while :; do sleep 0.05; done\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
         ),
     )
 
@@ -411,7 +416,7 @@ def test_run_session_from_non_main_thread_raises_without_spawning(tmp_path: Path
     marker = tmp_path / "started"
     script = _fake_qemu(
         tmp_path,
-        f"echo $$ > {marker}\nwhile :; do sleep 0.05; done\n",
+        f"echo $$ > {marker}\n" + _FAKE_LOOP,
     )
     errors: list[BaseException] = []
 
@@ -453,7 +458,7 @@ def test_signal_guard_forwards_signal_recorded_before_attach(tmp_path: Path):
             "/bin/sh",
             "-c",
             f"trap 'exit 0' TERM; echo $$ > {marker}; "
-            "while :; do sleep 0.05; done",
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done",
         ]
     )
     try:
