@@ -8,8 +8,11 @@
 from __future__ import annotations
 
 import os
+import time
+from dataclasses import dataclass
 
-_BLOCK_SIZE = 1024 * 1024
+_MIB = 1024 * 1024
+_BLOCK_SIZE = _MIB
 
 
 def create_disk_fd(size_mb: int) -> int:
@@ -81,6 +84,37 @@ def _pwrite_all(fd: int, data: bytes, offset: int) -> None:
     written = 0
     while written < len(data):
         written += os.pwrite(fd, data[written:], offset + written)
+
+
+@dataclass(frozen=True)
+class WipeResult:
+    """Resultado de poner a cero un medio: tamaño y tiempo empleado."""
+
+    size_mb: int
+    seconds: float
+
+
+def wipe_fd(fd: int) -> WipeResult:
+    """Sobrescribe con ceros todo el contenido del `memfd`, en bloques de 1 MiB.
+
+    No cambia el tamaño del medio. El llamador decide cuándo cerrar el fd.
+    """
+    size = os.fstat(fd).st_size
+    if size <= 0:
+        return WipeResult(size_mb=0, seconds=0.0)
+
+    block = b"\0" * _MIB
+    started = time.monotonic()
+    offset = 0
+    while offset < size:
+        chunk_len = min(_MIB, size - offset)
+        _pwrite_all(fd, block[:chunk_len], offset)
+        offset += chunk_len
+    seconds = time.monotonic() - started
+    return WipeResult(
+        size_mb=(size + _MIB - 1) // _MIB,
+        seconds=seconds,
+    )
 
 
 def validate_boot_files(kernel: str, initrd: str) -> None:

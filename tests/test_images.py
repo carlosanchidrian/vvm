@@ -6,7 +6,13 @@ import os
 
 import pytest
 
-from vvm.images import create_disk_fd, create_image_fd, validate_boot_files, validate_image
+from vvm.images import (
+    create_disk_fd,
+    create_image_fd,
+    validate_boot_files,
+    validate_image,
+    wipe_fd,
+)
 
 
 def test_create_disk_fd_is_256_mib():
@@ -120,5 +126,38 @@ def test_create_image_fd_copies_large_file_in_blocks(tmp_path):
     try:
         assert os.fstat(fd).st_size == len(payload)
         assert os.pread(fd, len(payload), 0) == payload
+    finally:
+        os.close(fd)
+
+
+def test_wipe_fd_zeroes_the_whole_medium_and_keeps_its_size():
+    size = 2 * 1024 * 1024
+    fd = os.memfd_create("vvm-wipe")
+    try:
+        os.ftruncate(fd, size)
+        os.pwrite(fd, b"PATRON" * 1000, 0)
+        os.pwrite(fd, b"OTRO" * 1000, size // 2)
+
+        result = wipe_fd(fd)
+
+        assert os.fstat(fd).st_size == size
+        assert result.size_mb == 2
+        assert result.seconds >= 0
+        assert os.pread(fd, size, 0) == b"\0" * size
+    finally:
+        os.close(fd)
+
+
+def test_wipe_fd_rounds_up_the_reported_size():
+    size = 2 * 1024 * 1024 + 17
+    fd = os.memfd_create("vvm-wipe")
+    try:
+        os.ftruncate(fd, size)
+
+        result = wipe_fd(fd)
+
+        assert os.fstat(fd).st_size == size
+        assert result.size_mb == 3
+        assert os.pread(fd, size, 0) == b"\0" * size
     finally:
         os.close(fd)
