@@ -199,7 +199,10 @@ def _precheck_lines(
     if failed:
         for check in failed:
             label = _STATUS_LABELS.get(check.status, check.status)
-            kind = "bloqueante" if check.blocking else "no bloqueante"
+            # Un aviso nunca bloquea: P2 avisa por `--mem < 2048` sin impedir el
+            # arranque, así que el informe no puede llamarlo «bloqueante».
+            blocking_check = check.status == "FAIL" and check.blocking
+            kind = "bloqueante" if blocking_check else "no bloqueante"
             lines.append(
                 f"   {check.id} {label} ({kind}) {check.vector}: {check.evidence}"
             )

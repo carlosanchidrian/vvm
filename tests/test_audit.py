@@ -104,6 +104,23 @@ def test_prechequeo_con_avisos_indica_el_resto_ok():
     assert _last_line(report) == CLEAN_VERDICT
 
 
+def test_aviso_de_p2_bajo_mem_no_se_etiqueta_como_bloqueante():
+    # P2 es bloqueante por tabla, pero en WARN (--mem < 2048) solo avisa.
+    p2 = _check(
+        "P2",
+        "Memoria RAM suficiente",
+        "WARN",
+        True,
+        "MemAvailable=8000 MB; necesario=1028 MB; aviso: --image con --mem 1024 MB",
+        "usa al menos --mem 2048",
+    )
+
+    report = audit.build_report(_snapshot(), _snapshot(), checks=(p2,), forced=False)
+
+    assert "P2 AVISO (no bloqueante) Memoria RAM suficiente:" in report
+    assert "P2 AVISO (bloqueante)" not in report
+
+
 def test_sesion_sin_prechequeo_carga_como_desconocida(tmp_path: Path):
     path = tmp_path / "antigua.json"
     path.write_text(
