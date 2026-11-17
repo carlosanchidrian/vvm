@@ -318,6 +318,14 @@ def run_session(
             process_io=io_sample,
         )
     finally:
+        # Red de seguridad: si algo inesperado interrumpe el bucle, no dejar
+        # QEMU vivo. En los caminos normales el hijo ya terminó.
+        if proc.poll() is None:
+            _send_signal(proc, signal.SIGKILL)
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
         for signum, handler in previous.items():
             signal.signal(signum, handler)
 
