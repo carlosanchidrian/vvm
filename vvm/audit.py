@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from vvm.host_check import CheckResult
-from vvm.vm import SESSION_MARKER
+from vvm.vm import SESSION_MARKER, ProcessIO
 
 MEMINFO_PATH = Path("/proc/meminfo")
 SHM_PATH = Path("/dev/shm")
@@ -52,6 +52,33 @@ class Snapshot:
 
 
 @dataclass(frozen=True)
+class WipeInfo:
+    """Resultado declarado del borrado del disco de datos."""
+
+    requested: bool
+    disk_mb: int
+    seconds: float | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class SessionExtras:
+    """Datos del cierre que acompañan a los snapshots.
+
+    `closure=None` significa que el CLI no midió el cierre (sesión antigua o
+    fallo antes de lanzar QEMU): el informe lo declara como desconocido.
+    """
+
+    closure: str | None = None
+    killed_after: float | None = None
+    wipe: WipeInfo | None = None
+    image_mode: bool = False
+    # `None` = sesión antigua que no midió el disco; `0` = sin disco de datos.
+    disk_mb: int | None = None
+    process_io: ProcessIO | None = None
+
+
+@dataclass(frozen=True)
 class Session:
     """Sesión guardada: snapshots más el pre-chequeo que la autorizó."""
 
@@ -59,6 +86,7 @@ class Session:
     after: Snapshot
     checks: tuple[CheckResult, ...] | None = None
     forced: bool = False
+    extras: SessionExtras = SessionExtras()
 
 
 def read_meminfo(path: Path = MEMINFO_PATH) -> dict[str, int]:
@@ -231,13 +259,16 @@ def build_report(
     *,
     checks: tuple[CheckResult, ...] | None = None,
     forced: bool = False,
+    extras: SessionExtras | None = None,
 ) -> str:
     """Genera el informe de la sesión con las secciones y el veredicto de SPEC §6.
 
     `checks` es el pre-chequeo que autorizó la sesión; `None` significa que la
     sesión guardada no lo incluía (formato antiguo). `forced` indica si se
-    arrancó con `--force`.
+    arrancó con `--force`. `extras` reúne el cierre, el I/O del proceso y el
+    resultado de `--wipe`.
     """
+    details = extras if extras is not None else SessionExtras()
     new_entries = sorted(set(after.shm_entries) - set(before.shm_entries))
     # Sin línea base de memfds (sesión antigua) no se puede atribuir nada: ni
     # «ninguno» (sería un falso negativo) ni un hallazgo.
@@ -258,6 +289,21 @@ def build_report(
         f"proceso QEMU vivo al cierre: pid {pid}"
         for pid in sorted(after.qemu_pids, key=_pid_sort_key)
     )
+    if details.killed_after is not None:
+        findings.append(
+            "QEMU no atendió el SIGTERM: "
+            f"SIGKILL a los {details.killed_after:g} s"
+        )
+    if details.wipe is not None and details.wipe.error is not None:
+        findings.append(f"borrado del disco falló: {details.wipe.error}")
+    if details.process_io is not None:
+        if details.image_mode and details.process_io.write_bytes > 0:
+            findings.append(_guest_io_note(details))
+        elif not details.image_mode and details.process_io.write_bytes > 0:
+            findings.append(
+                "I/O de disco inesperada en modo kernel: "
+                f"write_bytes={details.process_io.write_bytes} B"
+            )
     blocking = _blocking_failures(checks)
     forced_note = ""
     if blocking:
@@ -270,7 +316,7 @@ def build_report(
     lines = [
         "Informe de sesión VVM (determinista, sin IA)",
         f"Línea base: {before.taken_at}",
-        f"Cierre:     {after.taken_at}",
+        f"Instantánea final: {after.taken_at}",
         "",
         *_precheck_lines(checks, forced),
         "",
@@ -300,10 +346,17 @@ def build_report(
         "   y con un escritorio abierto tiene cientos de MB de ruido. Sin una línea base",
         "   limpia no se le puede atribuir al guest ninguna variación.",
         "",
-        "4. Log serie",
+        "4. I/O del proceso QEMU",
+        *_process_io_lines(details.process_io, details.image_mode, details.disk_mb),
+        "",
+        "5. Log serie",
         *_log_lines(log_path),
         "",
-        "5. Fuera del alcance de este informe",
+        "6. Cierre y borrado",
+        f"   Cierre: {details.closure or 'desconocido'}",
+        *_teardown_lines(details),
+        "",
+        "7. Fuera del alcance de este informe",
         "   - root y ptrace sobre el proceso: no se comprueban.",
         "   - volcado de memoria en vivo (LiME/AVML): no se comprueba.",
         "   - DMA y Thunderbolt: no se comprueban.",
@@ -311,7 +364,7 @@ def build_report(
         "   - journald y page cache: pendiente.",
         "   - la propia herramienta (VVM): no se audita a sí misma.",
         "",
-        "6. Veredicto",
+        "8. Veredicto",
         (
             "SIN HALLAZGOS EN LO COMPROBADO"
             if not findings
@@ -335,6 +388,96 @@ def _format_memfds(names: list[str], measured: bool) -> str:
 
 def _delta(before: int, after: int) -> str:
     return f"{after - before:+d}"
+
+
+def _guest_io_note(extras: SessionExtras) -> str:
+    """Lectura de las escrituras de una sesión con ventana, según el disco.
+
+    Con `--disk 0` no hay ningún disco de datos escribible y se mantiene la
+    frase de la especificación; con disco virtio no se puede afirmar que QEMU
+    no tenga dispositivo de bloque, así que se declara sin atribuir. Si la
+    sesión no midió el disco (formato antiguo) tampoco se puede afirmar nada
+    sobre dispositivos de bloque.
+    """
+    assert extras.process_io is not None
+    size = extras.process_io.write_bytes
+    if extras.disk_mb is None:
+        return (
+            f"I/O con GUI: {size} B; "
+            "el disco de datos no se midió en esta sesión, así que la escritura "
+            "no se puede atribuir solo al anfitrión"
+        )
+    if extras.disk_mb > 0:
+        return (
+            f"I/O con GUI y disco de datos: {size} B; "
+            "no se puede atribuir solo al anfitrión"
+        )
+    return (
+        f"I/O del anfitrión con GUI: {size} B; "
+        "QEMU no tiene ningún dispositivo de bloque abierto"
+    )
+
+
+def _process_io_lines(
+    io: ProcessIO | None, image_mode: bool, disk_mb: int | None
+) -> list[str]:
+    """Sección de I/O: contadores crudos y la lectura que autoriza el veredicto."""
+    if io is None:
+        return [
+            "   No disponible: no se pudo leer /proc/<pid>/io con la VM viva."
+        ]
+    lines = [
+        f"   rchar:       {io.rchar} B",
+        f"   wchar:       {io.wchar} B",
+        f"   read_bytes:  {io.read_bytes} B",
+        f"   write_bytes: {io.write_bytes} B",
+    ]
+    if image_mode and io.write_bytes > 0:
+        extras = SessionExtras(
+            image_mode=True, disk_mb=disk_mb, process_io=io
+        )
+        lines.append("   " + _guest_io_note(extras))
+    elif image_mode:
+        lines.append(
+            "   Sin escrituras a bloque detectadas en esta sesión con ventana."
+        )
+    elif io.write_bytes == 0:
+        lines.append(
+            "   write_bytes=0: no llegó ningún byte a un dispositivo de bloque."
+        )
+    else:
+        lines.append(
+            f"   write_bytes={io.write_bytes} B: hay I/O a bloque; "
+            "el testigo del modo kernel no se cumple."
+        )
+    return lines
+
+
+def _teardown_lines(extras: SessionExtras) -> list[str]:
+    """Líneas de cierre: SIGKILL, borrado del disco y declaración del ISO."""
+    lines: list[str] = []
+    if extras.killed_after is not None:
+        lines.append(
+            "   QEMU no atendió el SIGTERM: "
+            f"SIGKILL a los {extras.killed_after:g} s"
+        )
+    wipe = extras.wipe
+    if wipe is None:
+        lines.append("   Wipe: no solicitado")
+    elif wipe.error is not None:
+        lines.append(f"   Wipe: error: {wipe.error}")
+    elif wipe.disk_mb == 0:
+        lines.append("   Wipe: sin disco de datos")
+    else:
+        seconds = wipe.seconds if wipe.seconds is not None else 0.0
+        lines.append(
+            f"   Wipe: {wipe.disk_mb} MiB a cero en {seconds:.3f} s"
+        )
+    if extras.image_mode:
+        lines.append(
+            "   ISO: copia anónima liberada al cerrar; no se sobrescribe"
+        )
+    return lines
 
 
 def _log_lines(log_path: str | None) -> list[str]:
@@ -364,12 +507,14 @@ def save_session(
     after: Snapshot,
     checks: tuple[CheckResult, ...] | None = None,
     forced: bool = False,
+    extras: SessionExtras | None = None,
 ) -> None:
     """Guarda snapshots y, si se conoce, el pre-chequeo de la sesión en JSON."""
     document: dict[str, object] = {
         "before": _snapshot_to_dict(before),
         "after": _snapshot_to_dict(after),
         "forced": bool(forced),
+        "extras": _extras_to_dict(extras if extras is not None else SessionExtras()),
     }
     if checks is not None:
         document["checks"] = [asdict(check) for check in checks]
@@ -426,6 +571,7 @@ def load_session_full(path: Path) -> Session:
         after=_snapshot_from_dict(document["after"], "after", path),
         checks=checks,
         forced=forced,
+        extras=_extras_from_dict(document.get("extras"), path),
     )
 
 
@@ -449,6 +595,124 @@ def _snapshot_to_dict(snapshot: Snapshot) -> dict[str, object]:
 _FIELDS = ("shmem_kb", "mem_available_kb", "shm_entries", "qemu_pids", "taken_at")
 _CHECK_FIELDS = ("id", "vector", "status", "blocking", "evidence", "remediation")
 _CHECK_STRINGS = ("id", "vector", "status", "evidence", "remediation")
+_PROCESS_IO_FIELDS = ("rchar", "wchar", "read_bytes", "write_bytes")
+
+
+def _extras_to_dict(extras: SessionExtras) -> dict[str, object]:
+    return {
+        "closure": extras.closure,
+        "killed_after": extras.killed_after,
+        "image_mode": extras.image_mode,
+        "disk_mb": extras.disk_mb,
+        "process_io": (
+            asdict(extras.process_io) if extras.process_io is not None else None
+        ),
+        "wipe": asdict(extras.wipe) if extras.wipe is not None else None,
+    }
+
+
+def _extras_from_dict(raw: object, path: Path) -> SessionExtras:
+    """Carga los datos del cierre; una sesión antigua no los tiene y usa defectos."""
+    if raw is None:
+        return SessionExtras()
+    if not isinstance(raw, dict):
+        raise ValueError(f"El campo 'extras' de la sesión {path} debe ser un objeto.")
+
+    closure = raw.get("closure")
+    if closure is not None and (not isinstance(closure, str) or not closure):
+        raise ValueError(
+            f"El campo 'closure' de la sesión {path} debe ser una cadena no "
+            "vacía o null."
+        )
+    killed_after = raw.get("killed_after")
+    if killed_after is not None and (
+        not isinstance(killed_after, (int, float)) or isinstance(killed_after, bool)
+    ):
+        raise ValueError(
+            f"El campo 'killed_after' de la sesión {path} debe ser un número o null."
+        )
+    image_mode = raw.get("image_mode", False)
+    if not isinstance(image_mode, bool):
+        raise ValueError(
+            f"El campo 'image_mode' de la sesión {path} debe ser verdadero o falso."
+        )
+    disk_mb = raw.get("disk_mb")
+    if disk_mb is not None and (
+        not isinstance(disk_mb, int) or isinstance(disk_mb, bool) or disk_mb < 0
+    ):
+        raise ValueError(
+            f"El campo 'disk_mb' de la sesión {path} debe ser un entero no "
+            "negativo o null."
+        )
+
+    process_io = _process_io_from_dict(raw.get("process_io"), path)
+    wipe = _wipe_from_dict(raw.get("wipe"), path)
+    return SessionExtras(
+        closure=closure,
+        killed_after=float(killed_after) if killed_after is not None else None,
+        wipe=wipe,
+        image_mode=image_mode,
+        disk_mb=disk_mb,
+        process_io=process_io,
+    )
+
+
+def _process_io_from_dict(raw: object, path: Path) -> ProcessIO | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"El campo 'process_io' de la sesión {path} debe ser un objeto o null."
+        )
+    values: dict[str, int] = {}
+    for field in _PROCESS_IO_FIELDS:
+        value = raw.get(field)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(
+                f"El campo '{field}' de process_io en la sesión {path} "
+                "debe ser un entero."
+            )
+        values[field] = value
+    return ProcessIO(**values)
+
+
+def _wipe_from_dict(raw: object, path: Path) -> WipeInfo | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"El campo 'wipe' de la sesión {path} debe ser un objeto o null."
+        )
+    requested = raw.get("requested")
+    if not isinstance(requested, bool):
+        raise ValueError(
+            f"El campo 'requested' de wipe en la sesión {path} "
+            "debe ser verdadero o falso."
+        )
+    disk_mb = raw.get("disk_mb")
+    if not isinstance(disk_mb, int) or isinstance(disk_mb, bool):
+        raise ValueError(
+            f"El campo 'disk_mb' de wipe en la sesión {path} debe ser un entero."
+        )
+    seconds = raw.get("seconds")
+    if seconds is not None and (
+        not isinstance(seconds, (int, float)) or isinstance(seconds, bool)
+    ):
+        raise ValueError(
+            f"El campo 'seconds' de wipe en la sesión {path} "
+            "debe ser un número o null."
+        )
+    error = raw.get("error")
+    if error is not None and not isinstance(error, str):
+        raise ValueError(
+            f"El campo 'error' de wipe en la sesión {path} debe ser texto o null."
+        )
+    return WipeInfo(
+        requested=requested,
+        disk_mb=disk_mb,
+        seconds=float(seconds) if seconds is not None else None,
+        error=error,
+    )
 
 
 def _check_from_dict(raw: object, path: Path) -> CheckResult:

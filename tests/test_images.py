@@ -7,7 +7,13 @@ import os
 import pytest
 
 from vvm import images
-from vvm.images import create_disk_fd, create_image_fd, validate_boot_files, validate_image
+from vvm.images import (
+    create_disk_fd,
+    create_image_fd,
+    validate_boot_files,
+    validate_image,
+    wipe_fd,
+)
 
 
 def test_create_disk_fd_is_256_mib():
@@ -125,6 +131,39 @@ def test_create_image_fd_copies_large_file_in_blocks(tmp_path):
         os.close(fd)
 
 
+def test_wipe_fd_zeroes_the_whole_medium_and_keeps_its_size():
+    size = 2 * 1024 * 1024
+    fd = os.memfd_create("vvm-wipe")
+    try:
+        os.ftruncate(fd, size)
+        os.pwrite(fd, b"PATRON" * 1000, 0)
+        os.pwrite(fd, b"OTRO" * 1000, size // 2)
+
+        result = wipe_fd(fd)
+
+        assert os.fstat(fd).st_size == size
+        assert result.size_mb == 2
+        assert result.seconds >= 0
+        assert os.pread(fd, size, 0) == b"\0" * size
+    finally:
+        os.close(fd)
+
+
+def test_wipe_fd_rounds_up_the_reported_size():
+    size = 2 * 1024 * 1024 + 17
+    fd = os.memfd_create("vvm-wipe")
+    try:
+        os.ftruncate(fd, size)
+
+        result = wipe_fd(fd)
+
+        assert os.fstat(fd).st_size == size
+        assert result.size_mb == 3
+        assert os.pread(fd, size, 0) == b"\0" * size
+    finally:
+        os.close(fd)
+
+
 class _ShortSource:
     """Lector que anuncia un tamaño y devuelve la mitad: copia corta."""
 
@@ -186,7 +225,9 @@ def test_create_image_fd_closes_the_fd_on_unexpected_error(tmp_path, monkeypatch
         created.append(fd)
         return fd
 
-    def interrupted(path: str, fd: int, size: int) -> None:
+    def interrupted(
+        path: str, fd: int, size: int, should_stop=None
+    ) -> None:
         raise KeyboardInterrupt
 
     monkeypatch.setattr(images.os, "memfd_create", capture_memfd)
@@ -195,6 +236,36 @@ def test_create_image_fd_closes_the_fd_on_unexpected_error(tmp_path, monkeypatch
     with pytest.raises(KeyboardInterrupt):
         create_image_fd(str(iso))
 
+    assert created and not _is_open(created[0])
+
+
+def test_create_image_fd_stops_between_blocks_and_closes_the_fd(
+    tmp_path, monkeypatch
+):
+    iso = tmp_path / "live.iso"
+    iso.write_bytes(b"A" * (3 * 1024 * 1024))
+    created: list[int] = []
+    real_memfd = os.memfd_create
+
+    def capture_memfd(name: str, flags: int = 0) -> int:
+        fd = real_memfd(name, flags)
+        created.append(fd)
+        return fd
+
+    monkeypatch.setattr(images.os, "memfd_create", capture_memfd)
+    calls: list[int] = []
+
+    def should_stop() -> bool:
+        calls.append(1)
+        return len(calls) > 1
+
+    with pytest.raises(InterruptedError) as excinfo:
+        create_image_fd(str(iso), should_stop=should_stop)
+
+    mensaje = str(excinfo.value)
+    assert "interrumpió la copia" in mensaje
+    assert "1048576 de 3145728" in mensaje
+    assert len(calls) == 2
     assert created and not _is_open(created[0])
 
 
