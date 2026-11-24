@@ -203,8 +203,9 @@ python3 -m vvm audit [--session RUTA]
 Sin `--session`, lee la última sesión guardada por `run`. Imprime el informe
 determinista: pre-chequeo de la sesión (sección 0), entradas nuevas en `/dev/shm`,
 memfds nuevos comparados con la línea base —los del escritorio
-(`displaysurface`, `wayland-cursor`, `pulseaudio`) se declaran como pila del
-anfitrión, no del guest—, procesos QEMU de esa sesión vivos al cierre, deltas de
+(`displaysurface`, `wayland-cursor`, `pulseaudio` y los `pipewire-*`) se
+declaran como pila del anfitrión, no del guest—, procesos QEMU de esa sesión
+vivos al cierre, deltas de
 Shmem/MemAvailable, contadores de I/O de QEMU leídos con la VM viva, cierre y
 resultado de `--wipe`, log serie declarado y las exclusiones de alcance. En una
 sesión con ventana, si `write_bytes` no es cero el informe lo declara como I/O
@@ -264,5 +265,5 @@ vvm/
 ├── cli.py          # argparse: check | run | audit | profiles | tui
 ├── tui/            # Textual opcional: app, pantallas, widgets y CSS
 └── __main__.py     # python3 -m vvm
-tests/              # 266 tests, sin KVM
+tests/              # 269 tests, sin KVM
 ```

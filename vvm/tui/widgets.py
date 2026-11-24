@@ -115,11 +115,13 @@ class SessionPanel(Static):
             if snapshot.memfds is None or session.before.memfds is None:
                 lines.append(Text("Memfds del guest: no medidos"))
             else:
-                new_memfds = (
-                    set(snapshot.memfds)
-                    - set(session.before.memfds)
-                    - audit.HOST_STACK_MEMFDS
-                )
+                new_memfds = {
+                    name
+                    for name in (
+                        set(snapshot.memfds) - set(session.before.memfds)
+                    )
+                    if not audit.is_host_stack_memfd(name)
+                }
                 lines.append(
                     Text(
                         "Memfds del guest: "
