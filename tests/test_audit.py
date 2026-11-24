@@ -13,6 +13,7 @@ import pytest
 
 from vvm import audit
 from vvm.host_check import CheckResult
+from vvm.vm import ProcessIO
 
 CLEAN_VERDICT = "SIN HALLAZGOS EN LO COMPROBADO"
 
@@ -262,6 +263,20 @@ def test_deltas_de_memoria_con_signo():
     assert "MemAvailable: antes 4000000 kB, después 3999000 kB, delta -1000 kB" in report
 
 
+def test_cabecera_instantanea_final_no_se_confunde_con_cierre():
+    before = _snapshot(taken_at="2026-10-24T10:00:00Z")
+    after = _snapshot(taken_at="2026-10-24T10:05:00Z")
+
+    report = audit.build_report(before, after)
+    lines = report.splitlines()
+    cierres = [line for line in lines if line.strip().startswith("Cierre:")]
+    instantaneas = [line for line in lines if line.startswith("Instantánea final:")]
+
+    assert len(cierres) == 1
+    assert len(instantaneas) == 1
+    assert instantaneas[0] == "Instantánea final: 2026-10-24T10:05:00Z"
+
+
 def test_informe_es_determinista():
     before = _snapshot(shm_entries=("b", "a"))
     after = _snapshot(shm_entries=("a", "b", "c"), qemu_pids=("99", "100"))
@@ -414,6 +429,225 @@ def test_memfd_nuevo_fuera_de_la_pila_es_hallazgo():
     assert _last_line(report) == (
         "HALLAZGOS: memfd nuevo fuera de la pila del anfitrión: memfd:desconocido"
     )
+
+
+def _io(write_bytes: int = 0) -> ProcessIO:
+    return ProcessIO(
+        rchar=1000,
+        wchar=2000,
+        read_bytes=3000,
+        write_bytes=write_bytes,
+    )
+
+
+def test_io_con_gui_declara_hallazgo_y_no_niega_el_bloque():
+    extras = audit.SessionExtras(
+        image_mode=True, disk_mb=0, process_io=_io(868_352)
+    )
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "I/O del anfitrión con GUI: 868352 B; " in report
+    assert "QEMU no tiene ningún dispositivo de bloque abierto" in report
+    assert "rchar:       1000 B" in report
+    assert "write_bytes: 868352 B" in report
+    assert _last_line(report) == (
+        "HALLAZGOS: I/O del anfitrión con GUI: 868352 B; "
+        "QEMU no tiene ningún dispositivo de bloque abierto"
+    )
+
+
+def test_io_con_gui_sin_escrituras_no_es_hallazgo():
+    extras = audit.SessionExtras(image_mode=True, process_io=_io(0))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "Sin escrituras a bloque detectadas" in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_io_imagen_con_disco_de_datos_no_niega_el_bloque():
+    extras = audit.SessionExtras(
+        image_mode=True, disk_mb=256, process_io=_io(868_352)
+    )
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "QEMU no tiene ningún dispositivo de bloque abierto" not in report
+    nota = (
+        "I/O con GUI y disco de datos: 868352 B; "
+        "no se puede atribuir solo al anfitrión"
+    )
+    assert nota in report
+    assert _last_line(report) == "HALLAZGOS: " + nota
+
+
+def test_io_imagen_sin_medida_del_disco_no_afirma_que_no_haya_bloque():
+    # Sesión antigua: `extras` con imagen e I/O, pero sin `disk_mb`.
+    extras = audit.SessionExtras(image_mode=True, process_io=_io(868_352))
+    assert extras.disk_mb is None
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "QEMU no tiene ningún dispositivo de bloque abierto" not in report
+    nota = (
+        "I/O con GUI: 868352 B; el disco de datos no se midió en esta sesión, "
+        "así que la escritura no se puede atribuir solo al anfitrión"
+    )
+    assert nota in report
+    assert _last_line(report) == "HALLAZGOS: " + nota
+
+
+def test_save_load_conserva_disk_mb_sin_medir(tmp_path: Path):
+    path = tmp_path / "sesion.json"
+    extras = audit.SessionExtras(
+        image_mode=True, disk_mb=None, process_io=ProcessIO(1, 2, 3, 4)
+    )
+
+    audit.save_session(path, _snapshot(), _snapshot(), extras=extras)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["extras"]["disk_mb"] is None
+    assert audit.load_session_full(path).extras == extras
+
+
+def test_io_imagen_sin_disco_mantiene_la_frase_de_la_especificacion():
+    extras = audit.SessionExtras(image_mode=True, disk_mb=0, process_io=_io(4096))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert (
+        "I/O del anfitrión con GUI: 4096 B; "
+        "QEMU no tiene ningún dispositivo de bloque abierto"
+    ) in report
+
+
+def test_io_kernel_write_bytes_cero_es_el_testigo():
+    extras = audit.SessionExtras(image_mode=False, process_io=_io(0))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "write_bytes=0: no llegó ningún byte a un dispositivo de bloque." in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_io_kernel_con_escrituras_rompe_el_testigo():
+    extras = audit.SessionExtras(image_mode=False, process_io=_io(4096))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert _last_line(report) == (
+        "HALLAZGOS: I/O de disco inesperada en modo kernel: write_bytes=4096 B"
+    )
+
+
+def test_io_no_disponible_se_declara_sin_inventar_medidas():
+    extras = audit.SessionExtras(image_mode=True, process_io=None)
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "No disponible: no se pudo leer /proc/<pid>/io" in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_extras_del_cierre_aparecen_en_el_informe():
+    extras = audit.SessionExtras(
+        closure="SIGTERM",
+        killed_after=5.0,
+        wipe=audit.WipeInfo(requested=True, disk_mb=256, seconds=0.5),
+        image_mode=True,
+    )
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "Cierre: SIGTERM" in report
+    assert "QEMU no atendió el SIGTERM: SIGKILL a los 5 s" in report
+    assert "Wipe: 256 MiB a cero en 0.500 s" in report
+    assert "ISO: copia anónima liberada al cerrar; no se sobrescribe" in report
+
+
+def test_sigkill_tras_la_espera_es_hallazgo():
+    extras = audit.SessionExtras(killed_after=5.0)
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "QEMU no atendió el SIGTERM: SIGKILL a los 5 s" in report
+    assert _last_line(report) == (
+        "HALLAZGOS: QEMU no atendió el SIGTERM: SIGKILL a los 5 s"
+    )
+
+
+def test_error_de_wipe_es_hallazgo():
+    extras = audit.SessionExtras(wipe=audit.WipeInfo(True, 256, error="EIO"))
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "Wipe: error: EIO" in report
+    assert _last_line(report) == "HALLAZGOS: borrado del disco falló: EIO"
+
+
+def test_cierre_limpio_sigue_siendo_sin_hallazgos():
+    extras = audit.SessionExtras(
+        closure="normal",
+        wipe=audit.WipeInfo(requested=True, disk_mb=256, seconds=0.1),
+        process_io=_io(0),
+    )
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "QEMU no atendió el SIGTERM" not in report
+    assert _last_line(report) == CLEAN_VERDICT
+
+
+def test_wipe_sin_disco_y_no_solicitado_se_declaran():
+    sin_disco = audit.build_report(
+        _snapshot(),
+        _snapshot(),
+        extras=audit.SessionExtras(wipe=audit.WipeInfo(True, 0)),
+    )
+    no_pedido = audit.build_report(_snapshot(), _snapshot())
+
+    assert "Wipe: sin disco de datos" in sin_disco
+    assert "Wipe: no solicitado" in no_pedido
+
+
+def test_save_load_conserva_los_extras(tmp_path: Path):
+    path = tmp_path / "sesion.json"
+    extras = audit.SessionExtras(
+        closure="SIGHUP",
+        killed_after=None,
+        wipe=audit.WipeInfo(requested=True, disk_mb=8, seconds=0.01),
+        image_mode=True,
+        disk_mb=256,
+        process_io=ProcessIO(1, 2, 3, 4),
+    )
+
+    audit.save_session(path, _snapshot(), _snapshot(), extras=extras)
+
+    assert audit.load_session_full(path).extras == extras
+
+
+def test_sesion_antigua_sin_extras_declara_cierre_desconocido(tmp_path: Path):
+    path = tmp_path / "antigua.json"
+    path.write_text(
+        json.dumps({"before": asdict(_snapshot()), "after": asdict(_snapshot())}),
+        encoding="utf-8",
+    )
+
+    session = audit.load_session_full(path)
+
+    assert session.extras == audit.SessionExtras()
+    assert session.extras.closure is None
+    report = audit.build_report(session.before, session.after, extras=session.extras)
+    assert "Cierre: desconocido" in report
+    assert "Cierre: normal" not in report
+
+
+def test_cierre_normal_solo_cuando_se_midio():
+    extras = audit.SessionExtras(closure="normal")
+
+    report = audit.build_report(_snapshot(), _snapshot(), extras=extras)
+
+    assert "Cierre: normal" in report
 
 
 def test_sesion_antigua_sin_memfds_dice_no_medido(tmp_path: Path):

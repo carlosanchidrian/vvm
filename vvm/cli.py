@@ -5,11 +5,13 @@ a `sys.exit()` (eso lo hace `__main__.py`).
 
 Orden de `run`, deliberado: validar la fuente de arranque y el tamaño del ISO
 (solo `stat`) → pre-chequeo con una línea de descriptores simulados → línea base
-→ crear/copiar los medios → línea real con los fds. P7 y P9 solo inspeccionan la
-forma de la línea, así que el pre-chequeo puede ejecutarse antes de que exista
-ningún descriptor: así P2 mide la memoria que hay de verdad y el ISO no se copia
-si el anfitrión no es apto. La línea base se toma antes de crear los medios para
-que el delta de Shmem no descuente el propio ISO de la herramienta.
+→ crear/copiar los medios → línea real con los fds → guard de señales y sesión.
+P7 y P9 solo inspeccionan la forma de la línea, así que el pre-chequeo puede
+ejecutarse antes de que exista ningún descriptor: así P2 mide la memoria que hay
+de verdad y el ISO no se copia si el anfitrión no es apto. La línea base se toma
+antes de crear los medios para que el delta de Shmem no descuente el propio ISO
+de la herramienta. El guard se instala antes de `Popen` y sigue vigente durante
+todo el teardown: una señal en el cierre no impide el informe ni la sesión.
 """
 
 from __future__ import annotations
@@ -18,9 +20,10 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import sys
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from vvm import __version__, audit, host_check, images, vm
@@ -59,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--disk", type=int, default=256, metavar="MB")
     run.add_argument("--cpus", type=int, default=1)
     run.add_argument("--headless", action="store_true")
+    run.add_argument(
+        "--wipe",
+        action="store_true",
+        help="sobrescribe con ceros el disco de datos antes de cerrarlo",
+    )
     run.add_argument(
         "--log",
         metavar="RUTA",
@@ -208,10 +216,10 @@ def _boot_source_error(args: argparse.Namespace) -> str | None:
     if args.image and args.headless:
         return (
             "--image con --headless no está soportado.\n"
-            "El cargador del ISO pinta su menú en la consola VGA y con "
-            "-display none la sesión se queda parada ahí "
-            "(medido: 1 MB leído, 0 B de log).\n"
-            "El modo sin ventana es solo para --kernel/--initrd."
+            "[vvm] --image necesita pantalla: el cargador del ISO pinta su "
+            "menú en la consola VGA y con -display none la sesión se queda "
+            "parada ahí (medido: 1 MB leído, 0 B de log).\n"
+            "[vvm] El modo sin ventana es solo para --kernel/--initrd."
         )
     if args.image and args.log:
         return (
@@ -234,6 +242,42 @@ def _boot_source_error(args: argparse.Namespace) -> str | None:
     if args.cpus <= 0:
         return f"--cpus debe ser mayor que cero: {args.cpus}"
     return None
+
+
+def _closure_label(interrupt: int | None) -> str:
+    """Etiqueta del cierre para el informe."""
+    if interrupt is None:
+        return "normal"
+    if interrupt == signal.SIGINT:
+        return "Ctrl-C"
+    if interrupt == signal.SIGTERM:
+        return "SIGTERM"
+    if interrupt == signal.SIGHUP:
+        return "SIGHUP"
+    return f"señal {interrupt}"
+
+
+def _wipe_disk(
+    args: argparse.Namespace,
+    disk_fd: int | None,
+) -> audit.WipeInfo:
+    """Borra el disco si hay uno; con `--disk 0` solo lo declara, no falla."""
+    if args.disk == 0 or disk_fd is None:
+        return audit.WipeInfo(requested=True, disk_mb=0)
+    try:
+        result = images.wipe_fd(disk_fd)
+    except OSError as exc:
+        print(f"Aviso: no se pudo borrar el disco: {exc}", file=sys.stderr)
+        return audit.WipeInfo(
+            requested=True,
+            disk_mb=args.disk,
+            error=str(exc),
+        )
+    return audit.WipeInfo(
+        requested=True,
+        disk_mb=result.size_mb,
+        seconds=result.seconds,
+    )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -322,38 +366,96 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     disk_fd: int | None = None
     image_fd: int | None = None
+    # 5. Guard de señales instalado antes de la línea base y de `Popen`, y
+    # vigente durante todo el cierre (wipe, instantánea, informe y sesión).
+    guard = vm.SignalGuard()
     try:
-        # 5. Línea base limpia: antes de crear el disco y de copiar el ISO.
+        guard.install()
+    except (OSError, ValueError) as exc:
+        print(f"Error: no se pudo instalar el guard de señales: {exc}", file=sys.stderr)
+        return 1
+
+    exit_code = 0
+    qemu_interrupt: int | None = None
+    try:
+        # 6. Línea base limpia: antes de crear el disco y de copiar el ISO.
         before = audit.take_snapshot()
-        # 6. Medios ya autorizados por el pre-chequeo. El disco disperso (`memfd`
+        extras = audit.SessionExtras(
+            image_mode=bool(args.image), disk_mb=args.disk
+        )
+        # 7. Medios ya autorizados por el pre-chequeo. El disco disperso (`memfd`
         # + `ftruncate`) no ocupa RAM hasta que el guest escribe; el ISO sí se
-        # copia entero.
+        # copia entero. La copia consulta al guard antes de cada bloque: una
+        # señal la aborta en vez de copiar gigabytes antes de atenderla.
         if args.disk > 0:
             disk_fd = images.create_disk_fd(args.disk)
         if args.image:
-            image_fd = images.create_image_fd(args.image)
-        # 7. Línea real, con los descriptores de verdad.
-        cmd = vm.build_cmd(config, disk_fd, qemu=args.qemu, image_fd=image_fd)
-
-        exit_code = 0
+            try:
+                image_fd = images.create_image_fd(
+                    args.image, should_stop=lambda: guard.interrupt is not None
+                )
+            except InterruptedError as exc:
+                # No hay sesión que arrancar: se sale sin QEMU y sin teardown
+                # de una sesión que no empezó. El `finally` exterior cierra el
+                # disco y restaura el guard.
+                print(f"Interrumpido: {exc}", file=sys.stderr)
+                return 128 + (guard.interrupt or signal.SIGINT)
         try:
-            pass_fds = [
-                fd for fd in (disk_fd, image_fd) if fd is not None
-            ]
-            exit_code = vm.run_vm(cmd, pass_fds=pass_fds)
+            if guard.interrupt is not None:
+                # La señal llegó con los medios ya creados: no se lanza QEMU,
+                # pero el cierre es el normal (cerrar, borrar e informar).
+                exit_code = 128 + guard.interrupt
+            else:
+                # Línea real, con los descriptores de verdad.
+                cmd = vm.build_cmd(
+                    config, disk_fd, qemu=args.qemu, image_fd=image_fd
+                )
+                if guard.interrupt is not None:
+                    # La señal llegó mientras se construía la línea: QEMU no se
+                    # lanza, pero el cierre es el normal (cerrar, borrar e
+                    # informar) con el código de señal.
+                    exit_code = 128 + guard.interrupt
+                else:
+                    pass_fds = [
+                        fd for fd in (disk_fd, image_fd) if fd is not None
+                    ]
+                    # 8. Sesión bajo el guard del llamador: `run_session` no lo
+                    # restaura.
+                    outcome = vm.run_session(cmd, pass_fds=pass_fds, guard=guard)
+                    exit_code = outcome.returncode
+                    qemu_interrupt = outcome.interrupt
+                    extras = audit.SessionExtras(
+                        closure=_closure_label(outcome.interrupt),
+                        killed_after=outcome.killed_after,
+                        image_mode=bool(args.image),
+                        disk_mb=args.disk,
+                        process_io=outcome.process_io,
+                    )
         except KeyboardInterrupt:
             exit_code = 130
+            qemu_interrupt = signal.SIGINT
+            extras = audit.SessionExtras(
+                closure="Ctrl-C",
+                image_mode=bool(args.image),
+                disk_mb=args.disk,
+            )
             print(
                 "Sesión interrumpida; se emite el informe igualmente.",
                 file=sys.stderr,
             )
         finally:
-            # El informe sale pase lo que pase: salida normal, Ctrl-C o error de QEMU.
-            # Cerrar los medios antes de medir: si no, Shmem incluye lo que el
-            # guest escribió y el «después» nunca vuelve a la línea base. El
-            # finally exterior queda como red de seguridad si algo falla antes.
+            # 9. El informe sale pase lo que pase: salida normal, Ctrl-C o
+            # señal. Durante el teardown el guard solo registra la señal; no
+            # aborta el wipe, la instantánea, el informe ni la sesión.
+            # Orden deliberado: cerrar el ISO, borrar el disco si se pidió,
+            # cerrar el disco y solo entonces medir. Si el disco siguiera
+            # abierto, Shmem incluiría lo que el guest escribió y el «después»
+            # nunca volvería a la línea base. El finally exterior queda como
+            # red de seguridad si algo falla antes.
             _close_fd(image_fd)
             image_fd = None
+            if args.wipe:
+                extras = replace(extras, wipe=_wipe_disk(args, disk_fd))
             _close_fd(disk_fd)
             disk_fd = None
             try:
@@ -364,6 +466,18 @@ def cmd_run(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 after = before
+            if guard.interrupt is not None:
+                # La señal llegó antes de construir el informe: se declara.
+                extras = replace(extras, closure=_closure_label(guard.interrupt))
+            report_text = audit.build_report(
+                before,
+                after,
+                None if args.image else args.log,
+                checks=tuple(results),
+                forced=args.force,
+                extras=extras,
+            )
+            _emit_report(report_text, args.report)
             try:
                 audit.save_session(
                     audit.default_session_path(),
@@ -371,26 +485,35 @@ def cmd_run(args: argparse.Namespace) -> int:
                     after,
                     checks=tuple(results),
                     forced=args.force,
+                    extras=extras,
                 )
             except (OSError, RuntimeError) as exc:
                 print(f"Aviso: no se pudo guardar la sesión: {exc}", file=sys.stderr)
-            _emit_report(
-                audit.build_report(
-                    before,
-                    after,
-                    None if args.image else args.log,
-                    checks=tuple(results),
-                    forced=args.force,
-                ),
-                args.report,
-            )
-        return exit_code
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
         _close_fd(image_fd)
         _close_fd(disk_fd)
+        # 10. Restauración del guard al final del cierre.
+        guard.restore()
+
+    if qemu_interrupt is None and guard.interrupt is not None:
+        # Señal que no inició el cierre de QEMU (p. ej. durante el wipe).
+        exit_code = 128 + guard.interrupt
+    if (
+        extras.wipe is not None
+        and extras.wipe.error is not None
+        and exit_code == 0
+    ):
+        # Un wipe pedido y fallido es un cierre incompleto: no puede salir 0.
+        # Si ya había un código de señal (130/143/129) se conserva.
+        print(
+            "El cierre quedó incompleto por el error de borrado; se sale con 1.",
+            file=sys.stderr,
+        )
+        exit_code = 1
+    return exit_code
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
@@ -406,14 +529,16 @@ def cmd_audit(args: argparse.Namespace) -> int:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"No se pudo cargar la sesión: {exc}", file=sys.stderr)
         return 1
-    print(
-        audit.build_report(
-            session.before,
-            session.after,
-            checks=session.checks,
-            forced=session.forced,
-        )
+    report = audit.build_report(
+        session.before,
+        session.after,
+        checks=session.checks,
+        forced=session.forced,
+        extras=session.extras,
     )
+    # `build_report` ya termina en salto de línea: sin uno extra, el informe de
+    # `audit` es byte a byte igual al que escribió `run`.
+    sys.stdout.write(report)
     return 0
 
 

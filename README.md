@@ -43,7 +43,7 @@ identificador interno por comprobación.
 ```bash
 python3 -m vvm run \
   (--image live.iso | --kernel vmlinuz-virt --initrd initramfs-virt) \
-  [--mem 512] [--disk 256] [--cpus 1] \
+  [--mem 512] [--disk 256] [--cpus 1] [--wipe] \
   [--headless --log /tmp/vvm-serial.log] \
   [--report informe.txt] [--qemu qemu-system-x86_64] \
   [--dry-run] [--force]
@@ -68,11 +68,14 @@ Secuencia:
 4. Crea el disco del guest en un `memfd` (256 MiB por defecto; `--disk 0` lo
    desactiva) y, con `--image`, copia el ISO a otro `memfd`.
 5. Construye la línea de QEMU definitiva con los descriptores reales.
-6. Lanza QEMU heredando los fds del disco y del ISO.
-7. Al salir —normal, error o Ctrl-C— cierra los fds, imprime el informe (con el
-   pre-chequeo en la sección 0) y guarda la sesión en
-   `$XDG_STATE_HOME/vvm/last-session.json` (por defecto
+6. Instala el guard de señales (SIGTERM, SIGHUP y SIGINT) y lanza QEMU
+   heredando los fds del disco y del ISO.
+7. Al salir —normal, error, Ctrl-C, SIGTERM o SIGHUP— cierra el ISO, borra el
+   disco si se pidió `--wipe`, cierra el disco, toma la instantánea final,
+   imprime el informe (con el pre-chequeo en la sección 0) y guarda la sesión
+   en `$XDG_STATE_HOME/vvm/last-session.json` (por defecto
    `~/.local/state/vvm/last-session.json`).
+8. Restaura los manejadores de señal.
 
 El orden importa: el ISO se copia entero en RAM, así que la comprobación de memoria mide la que
 hay de verdad antes de esa copia, y la línea base se toma antes de que el
@@ -84,6 +87,9 @@ Detalles:
 - `--dry-run` imprime la línea final con `<fd>` en lugar de cada descriptor, no
   crea ningún fd, no lee el ISO y no ejecuta QEMU ni el pre-chequeo.
 - `--disk 0` desactiva el disco de datos, lo habitual con un live.
+- `--wipe` sobrescribe con ceros el disco de datos antes de cerrarlo, también si
+  la sesión se interrumpe. Con `--disk 0` no es un error: el informe declara
+  «sin disco de datos». El ISO no se borra: se libera al cerrar su `memfd`.
 - `--headless` exige `--log` y solo vale para `--kernel/--initrd`: sin fichero
   de salida se perdería la consola del guest.
 - `--log` no aplica con `--image`: el live se pilota en la ventana y su consola
@@ -92,6 +98,21 @@ Detalles:
   inválido sale con código 2 y sin haber tocado la memoria.
 - `--report RUTA` escribe el informe en un fichero en vez de por pantalla
   (crea el directorio si falta).
+- Ctrl-C, SIGTERM y SIGHUP cierran la sesión de forma ordenada: se reenvía
+  SIGTERM a QEMU, se espera hasta 5 s y, si no atiende, se le manda SIGKILL (el
+  informe lo declara). El CLI sale con 130, 143 o 129 respectivamente.
+- Las señales cubren todo el ciclo, no solo la vida de QEMU: durante el
+  teardown (wipe, instantánea final, informe y guardado) solo se registran y el
+  cierre termina; una señal que no inició el cierre sale como `128+señal` y el
+  informe dice `Cierre: SIGTERM`, `SIGHUP` o `Ctrl-C` si llegó antes de
+  construirlo. Si ya no consta cómo cerró la sesión (por ejemplo, un fallo
+  antes de lanzar QEMU o una sesión antigua), el informe dice
+  `Cierre: desconocido`.
+- Ventana del cierre: si la señal llega **después** de construir el informe
+  (mientras se escribe el fichero o se guarda la sesión), el informe puede
+  declarar el cierre anterior —normal o la señal previa— porque ya estaba
+  compuesto; el código de salida sigue siendo `128+señal`. El fichero es una
+  foto del cierre, no una promesa sobre los últimos milisegundos.
 - Para salir de una sesión interactiva: **Ctrl-A x**.
 
 ### `vvm audit` — informe de una sesión
@@ -105,10 +126,15 @@ determinista: pre-chequeo de la sesión (sección 0), entradas nuevas en `/dev/s
 memfds nuevos comparados con la línea base —los del escritorio
 (`displaysurface`, `wayland-cursor`, `pulseaudio`) se declaran como pila del
 anfitrión, no del guest—, procesos QEMU de esa sesión vivos al cierre, deltas de
-Shmem/MemAvailable, log serie declarado y las exclusiones de alcance. Si se arrancó con `--force` y había
-fallos bloqueantes, el veredicto lo dice. La ruta del log no se persiste en la
-sesión, así que al reconstruir el informe desde `audit` la sección del log sale
-vacía.
+Shmem/MemAvailable, contadores de I/O de QEMU leídos con la VM viva, cierre y
+resultado de `--wipe`, log serie declarado y las exclusiones de alcance. En una
+sesión con ventana, si `write_bytes` no es cero el informe lo declara como I/O
+del anfitrión con GUI; con `--disk 256` (el valor por defecto) la frase no
+afirma que no haya dispositivo de bloque: dice que la I/O no se puede atribuir
+solo al anfitrión, porque el guest tiene un disco virtio. En modo kernel,
+`write_bytes=0` es el testigo. Si se arrancó con `--force` y había fallos
+bloqueantes, el veredicto lo dice. La ruta del log no se persiste en la sesión,
+así que al reconstruir el informe desde `audit` la sección del log sale vacía.
 
 ## Qué garantiza la línea de QEMU
 
@@ -132,6 +158,9 @@ vacía.
 - La herramienta no ejecuta `sudo`: si `vvm check` pide `swapoff`, lo propone y
   eres tú quien decide.
 - No crea ni borra entradas de `/dev/shm` ajenas.
+- `--wipe` borra el disco de datos, no la RAM del guest (su `memfd` es de QEMU y
+  muere con él; la remanencia DRAM queda fuera del modelo de amenaza) ni el ISO
+  (copia de una imagen pública que se libera al cerrar).
 - La IA no interviene en la ejecución: los veredictos los calcula el código.
 
 ## Desarrollo
@@ -152,5 +181,5 @@ vvm/
 ├── audit.py        # snapshots, informe y sesión en JSON
 ├── cli.py          # argparse: check | run | audit
 └── __main__.py     # python3 -m vvm
-tests/              # 148 tests, sin KVM
+tests/              # 197 tests, sin KVM
 ```

@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import threading
+import time
+from pathlib import Path
+
 import pytest
 
-from vvm.vm import VmConfig, build_cmd, run_vm
+import vvm.vm as vm_module
+from vvm.vm import (
+    ProcessIO,
+    SignalGuard,
+    VmConfig,
+    build_cmd,
+    read_process_io,
+    run_session,
+    run_vm,
+)
 
 
 def make_config(**overrides) -> VmConfig:
@@ -200,3 +216,329 @@ def test_build_cmd_accepts_placeholder_for_dry_run():
 
     assert "file=/dev/fd/<fd>,format=raw,media=cdrom,readonly=on" in cmd
     assert "file=/dev/fd/<fd>,format=raw,if=virtio,cache=writethrough" in cmd
+
+
+# Bucle acotado (~20 s) para que un fake que nunca recibe la señal no cuelgue
+# la suite indefinidamente.
+_FAKE_LOOP = "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
+
+
+def _fake_qemu(tmp_path: Path, body: str) -> Path:
+    script = tmp_path / "fake-qemu"
+    script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+def _signal_when_ready(marker: Path, signum: int = signal.SIGTERM) -> threading.Thread:
+    def waiter() -> None:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        os.kill(os.getpid(), signum)
+
+    thread = threading.Thread(target=waiter, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_read_process_io_reads_the_four_counters(tmp_path: Path):
+    proc = tmp_path / "123"
+    proc.mkdir()
+    (proc / "io").write_text(
+        "rchar: 10\nwchar: 20\nsyscr: 1\nsyscw: 2\n"
+        "read_bytes: 30\nwrite_bytes: 40\ncancelled_write_bytes: 0\n",
+        encoding="utf-8",
+    )
+
+    assert read_process_io(123, str(tmp_path)) == ProcessIO(
+        rchar=10, wchar=20, read_bytes=30, write_bytes=40
+    )
+
+
+def test_read_process_io_missing_or_incomplete_returns_none(tmp_path: Path):
+    assert read_process_io(999, str(tmp_path)) is None
+
+    proc = tmp_path / "123"
+    proc.mkdir()
+    (proc / "io").write_text("rchar: 10\n", encoding="utf-8")
+
+    assert read_process_io(123, str(tmp_path)) is None
+
+
+def test_run_session_normal_exit_returns_child_code():
+    outcome = run_session(["/bin/true"], io_poll=0.01)
+
+    assert outcome.returncode == 0
+    assert outcome.interrupt is None
+    assert outcome.killed_after is None
+
+
+def test_run_session_forwards_sigterm_and_returns_143(tmp_path: Path):
+    marker = tmp_path / "started"
+    script = _fake_qemu(
+        tmp_path,
+        (
+            "sleep 0.2\n"
+            f"echo $$ > {marker}\n"
+            "trap 'exit 0' TERM\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
+        ),
+    )
+    sender = _signal_when_ready(marker)
+
+    outcome = run_session([str(script)], term_wait=1.0, io_poll=0.01)
+    sender.join()
+
+    assert outcome.returncode == 143
+    assert outcome.interrupt == signal.SIGTERM
+    assert outcome.killed_after is None
+    child = int(marker.read_text(encoding="utf-8").strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+
+
+def test_run_session_forwards_sighup_and_returns_129(tmp_path: Path):
+    marker = tmp_path / "started"
+    script = _fake_qemu(
+        tmp_path,
+        (
+            "sleep 0.2\n"
+            f"echo $$ > {marker}\n"
+            "trap 'exit 0' TERM\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
+        ),
+    )
+    sender = _signal_when_ready(marker, signal.SIGHUP)
+
+    outcome = run_session([str(script)], term_wait=1.0, io_poll=0.01)
+    sender.join()
+
+    assert outcome.returncode == 129
+    assert outcome.interrupt == signal.SIGHUP
+
+
+def test_run_session_kills_child_that_ignores_sigterm(tmp_path: Path):
+    marker = tmp_path / "started"
+    script = _fake_qemu(
+        tmp_path,
+        (
+            "sleep 0.2\n"
+            f"echo $$ > {marker}\n"
+            "trap '' TERM\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
+        ),
+    )
+    sender = _signal_when_ready(marker)
+
+    outcome = run_session([str(script)], term_wait=0.2, io_poll=0.01)
+    sender.join()
+
+    assert outcome.returncode == 143
+    assert outcome.interrupt == signal.SIGTERM
+    assert outcome.killed_after == 0.2
+    child = int(marker.read_text(encoding="utf-8").strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+
+
+def test_run_session_reports_process_io_of_a_live_child(tmp_path: Path):
+    script = _fake_qemu(
+        tmp_path,
+        (
+            "dd if=/dev/zero of=/dev/null bs=64k count=8 2>/dev/null\n"
+            "sleep 0.4\n"
+        ),
+    )
+
+    outcome = run_session([str(script)], io_poll=0.01)
+
+    assert outcome.returncode == 0
+    assert outcome.process_io is not None
+    assert outcome.process_io.rchar > 0
+
+
+def test_run_session_sigint_returns_130_and_leaves_no_child(tmp_path: Path):
+    marker = tmp_path / "started"
+    script = _fake_qemu(
+        tmp_path,
+        (
+            "sleep 0.2\n"
+            f"echo $$ > {marker}\n"
+            "trap 'exit 0' TERM\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
+        ),
+    )
+    sender = _signal_when_ready(marker, signal.SIGINT)
+
+    outcome = run_session([str(script)], term_wait=1.0, io_poll=0.01)
+    sender.join()
+
+    assert outcome.returncode == 130
+    assert outcome.interrupt == signal.SIGINT
+    child = int(marker.read_text(encoding="utf-8").strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+
+
+def test_run_session_second_signal_measures_time_from_the_first(tmp_path: Path):
+    marker = tmp_path / "started"
+    script = _fake_qemu(
+        tmp_path,
+        (
+            "sleep 0.2\n"
+            f"echo $$ > {marker}\n"
+            "trap '' TERM\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
+        ),
+    )
+
+    def sender() -> None:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    thread = threading.Thread(target=sender, daemon=True)
+    thread.start()
+    outcome = run_session([str(script)], term_wait=5.0, io_poll=0.01)
+    thread.join(timeout=5)
+
+    assert outcome.returncode == 143
+    assert outcome.interrupt == signal.SIGTERM
+    assert outcome.killed_after is not None
+    # El informe no debe decir «0 s»: se mide desde la primera señal.
+    assert 0.2 <= outcome.killed_after < 4.0
+
+
+def test_run_session_from_non_main_thread_raises_without_spawning(tmp_path: Path):
+    marker = tmp_path / "started"
+    script = _fake_qemu(
+        tmp_path,
+        f"echo $$ > {marker}\n" + _FAKE_LOOP,
+    )
+    errors: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            run_session([str(script)], io_poll=0.01)
+        except BaseException as exc:  # noqa: BLE001 - se comprueba el tipo abajo
+            errors.append(exc)
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join(timeout=10)
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert not marker.exists()
+
+
+def test_run_session_with_external_guard_does_not_restore_handlers():
+    guard = SignalGuard()
+    guard.install()
+    try:
+        handler = signal.getsignal(signal.SIGTERM)
+
+        outcome = run_session(["/bin/true"], io_poll=0.01, guard=guard)
+
+        assert outcome.returncode == 0
+        assert signal.getsignal(signal.SIGTERM) is handler
+    finally:
+        guard.restore()
+
+
+def test_signal_guard_forwards_signal_recorded_before_attach(tmp_path: Path):
+    marker = tmp_path / "started"
+    guard = SignalGuard()
+    guard.install()
+    proc = subprocess.Popen(
+        [
+            "/bin/sh",
+            "-c",
+            f"trap 'exit 0' TERM; echo $$ > {marker}; "
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done",
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # Simula la señal llegada entre `install()` y `Popen`.
+        guard.interrupts.append(signal.SIGTERM)
+        guard.first_signal_at = time.monotonic()
+
+        guard.attach(proc)
+        proc.wait(timeout=5)
+
+        assert proc.returncode == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        guard.restore()
+
+
+def test_run_session_restores_handlers_when_the_guard_is_its_own():
+    before = signal.getsignal(signal.SIGTERM)
+
+    outcome = run_session(["/bin/true"], io_poll=0.01)
+
+    assert outcome.returncode == 0
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_signal_guard_does_not_claim_a_kill_for_a_finished_child(monkeypatch):
+    sent: list[tuple[object, int]] = []
+    monkeypatch.setattr(
+        vm_module, "_send_signal", lambda proc, signum: sent.append((proc, signum))
+    )
+
+    class Finished:
+        """Hijo que ya terminó antes de `attach()`."""
+
+        def poll(self) -> int:
+            return 0
+
+    guard = SignalGuard()
+    guard.install()
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert guard.force_killed is True
+        # Los manejadores no tenían hijo: nada que enviar hasta `attach()`.
+        sent.clear()
+
+        guard.attach(Finished())
+
+        assert sent == []
+        assert guard.killed_after is None
+    finally:
+        guard.restore()
+
+
+def test_signal_guard_kill_pending_before_attach_is_sent_on_attach():
+    guard = SignalGuard()
+    guard.install()
+    proc = None
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+        # Sin hijo asociado no se ha enviado nada ni se miente con el tiempo.
+        assert guard.force_killed is True
+        assert guard.killed_after is None
+
+        proc = subprocess.Popen(["/bin/sleep", "30"])
+        guard.attach(proc)
+
+        assert guard.killed_after is not None
+        proc.wait(timeout=5)
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        guard.restore()
