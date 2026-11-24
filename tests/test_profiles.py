@@ -826,3 +826,249 @@ serial_log = "serie.log"
     err = capsys.readouterr().err
     assert "serial_log" in err
     assert "excluyentes" in err
+
+
+def test_update_profile_conserva_el_comentario_del_siguiente(tmp_path: Path):
+    target = tmp_path / "profiles.toml"
+    target.write_text(
+        (
+            'default = "b"\n'
+            "\n"
+            "# cabecera\n"
+            "\n"
+            "# === A: kernel ===\n"
+            "[profiles.a]\n"
+            'kernel = "/a"\n'
+            'initrd = "/ai"\n'
+            "wipe = false\n"
+            "\n"
+            "# === B: kernel del PoC, no borrar\n"
+            "\n"
+            "[profiles.b]\n"
+            'kernel = "/b"\n'
+            'initrd = "/bi"\n'
+            "wipe = false\n"
+        ),
+        encoding="utf-8",
+    )
+
+    profiles.update_profile(
+        target,
+        profiles.Profile(
+            name="a",
+            kernel="/a",
+            initrd="/ai",
+            wipe=True,
+        ),
+    )
+
+    assert target.read_text(encoding="utf-8") == (
+        'default = "b"\n'
+        "\n"
+        "# cabecera\n"
+        "\n"
+        "[profiles.a]\n"
+        'kernel = "/a"\n'
+        'initrd = "/ai"\n'
+        "mem_mb = 512\n"
+        "disk_mb = 256\n"
+        "cpus = 1\n"
+        "headless = false\n"
+        "wipe = true\n"
+        "\n"
+        "# === B: kernel del PoC, no borrar\n"
+        "\n"
+        "[profiles.b]\n"
+        'kernel = "/b"\n'
+        'initrd = "/bi"\n'
+        "wipe = false\n"
+    )
+    assert profiles.load_profiles(target).get("a").wipe is True
+    assert profiles.load_profiles(target).default == "b"
+
+
+def test_delete_profile_quita_su_comentario_y_conserva_el_siguiente(
+    tmp_path: Path,
+):
+    target = tmp_path / "profiles.toml"
+    target.write_text(
+        (
+            'default = "b"\n'
+            "\n"
+            "# cabecera\n"
+            "\n"
+            "# === A: kernel ===\n"
+            "[profiles.a]\n"
+            'kernel = "/a"\n'
+            'initrd = "/ai"\n'
+            "wipe = false\n"
+            "\n"
+            "# === B: kernel del PoC, no borrar\n"
+            "\n"
+            "[profiles.b]\n"
+            'kernel = "/b"\n'
+            'initrd = "/bi"\n'
+            "wipe = false\n"
+        ),
+        encoding="utf-8",
+    )
+
+    profiles.delete_profile(target, "a")
+
+    assert target.read_text(encoding="utf-8") == (
+        'default = "b"\n'
+        "\n"
+        "# cabecera\n"
+        "\n"
+        "# === B: kernel del PoC, no borrar\n"
+        "\n"
+        "[profiles.b]\n"
+        'kernel = "/b"\n'
+        'initrd = "/bi"\n'
+        "wipe = false\n"
+    )
+    loaded = profiles.load_profiles(target)
+    assert loaded.default == "b"
+    assert set(loaded.profiles) == {"b"}
+
+
+def test_add_profile_desde_cero_deja_una_sola_linea_en_blanco(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    target = tmp_path / "profiles.toml"
+
+    profiles.add_profile(
+        target,
+        profiles.Profile(
+            name="uno",
+            image="/tmp/uno.iso",
+            mem_mb=512,
+            disk_mb=0,
+            cpus=1,
+        ),
+    )
+
+    assert target.read_text(encoding="utf-8") == (
+        'default = "uno"\n'
+        "\n"
+        "[profiles.uno]\n"
+        'image = "/tmp/uno.iso"\n'
+        "mem_mb = 512\n"
+        "disk_mb = 0\n"
+        "cpus = 1\n"
+        "headless = false\n"
+        "wipe = false\n"
+    )
+
+
+def test_add_profile_conserva_finales_de_linea_crlf(tmp_path: Path):
+    target = tmp_path / "profiles.toml"
+    original = (
+        "# cabecera\r\n"
+        "\r\n"
+        "[profiles.uno]\r\n"
+        'image = "/tmp/uno.iso"\r\n'
+        "\r\n"
+        "[profiles.dos]\r\n"
+        'image = "/tmp/dos.iso"\r\n'
+    ).encode("utf-8")
+    target.write_bytes(original)
+
+    profiles.add_profile(
+        target,
+        profiles.Profile(name="tres", image="/tmp/tres.iso", disk_mb=0),
+    )
+
+    raw = target.read_bytes()
+    assert raw.startswith(original)
+    assert b'[profiles.tres]\r\nimage = "/tmp/tres.iso"\r\n' in raw
+    assert raw.replace(b"\r\n", b"").count(b"\n") == 0
+    assert raw.replace(b"\r\n", b"").count(b"\r") == 0
+    assert profiles.load_profiles(target).get("tres").disk_mb == 0
+
+
+def test_update_y_delete_conservan_finales_de_linea_crlf(tmp_path: Path):
+    original = (
+        'default = "b"\r\n'
+        "\r\n"
+        "[profiles.a]\r\n"
+        'image = "/a.iso"\r\n'
+        "\r\n"
+        "[profiles.b]\r\n"
+        'image = "/b.iso"\r\n'
+    ).encode("utf-8")
+    update_target = tmp_path / "update.toml"
+    update_target.write_bytes(original)
+    profiles.update_profile(
+        update_target,
+        profiles.Profile(name="a", image="/a2.iso"),
+    )
+    update_raw = update_target.read_bytes()
+    assert update_raw.replace(b"\r\n", b"").count(b"\n") == 0
+    assert update_raw.replace(b"\r\n", b"").count(b"\r") == 0
+    assert profiles.load_profiles(update_target).get("a").image == "/a2.iso"
+
+    delete_target = tmp_path / "delete.toml"
+    delete_target.write_bytes(original)
+    profiles.delete_profile(delete_target, "a")
+    delete_raw = delete_target.read_bytes()
+    assert delete_raw.replace(b"\r\n", b"").count(b"\n") == 0
+    assert delete_raw.replace(b"\r\n", b"").count(b"\r") == 0
+    assert profiles.load_profiles(delete_target).default == "b"
+    assert set(profiles.load_profiles(delete_target).profiles) == {"b"}
+
+
+def test_delete_profile_no_duplica_la_linea_en_blanco(tmp_path: Path):
+    target = tmp_path / "profiles.toml"
+    target.write_text(
+        (
+            'default = "a"\n'
+            "\n"
+            "[profiles.a]\n"
+            'image = "/a.iso"\n'
+            "\n"
+            "[profiles.b]\n"
+            'image = "/b.iso"\n'
+            "\n"
+            "[profiles.c]\n"
+            'image = "/c.iso"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    profiles.delete_profile(target, "b")
+
+    assert target.read_text(encoding="utf-8") == (
+        'default = "a"\n'
+        "\n"
+        "[profiles.a]\n"
+        'image = "/a.iso"\n'
+        "\n"
+        "[profiles.c]\n"
+        'image = "/c.iso"\n'
+    )
+
+
+def test_delete_default_entrecomillado_no_duplica_la_clave(tmp_path: Path):
+    target = tmp_path / "profiles.toml"
+    target.write_text(
+        (
+            '"default" = "a"\n'
+            "\n"
+            "[profiles.a]\n"
+            'image = "/a.iso"\n'
+            "\n"
+            "[profiles.b]\n"
+            'image = "/b.iso"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    saved = profiles.delete_profile(target, "a")
+
+    text = target.read_text(encoding="utf-8")
+    assert saved.default == "b"
+    assert text.count("default") == 1
+    assert 'default = "b"' in text
+    assert profiles.load_profiles(target).default == "b"

@@ -303,7 +303,9 @@ def _atomic_write(target: Path, text: str) -> None:
         text=True,
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(
+            fd, "w", encoding="utf-8", newline=""
+        ) as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -315,6 +317,12 @@ def _atomic_write(target: Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def _read_text(target: Path) -> str:
+    """Lee sin normalizar finales de línea (CRLF se conserva)."""
+    with target.open(encoding="utf-8", newline="") as handle:
+        return handle.read()
 
 
 def save_profiles(
@@ -348,22 +356,44 @@ def _header_name(line: str) -> str | None:
     return None
 
 
+def _is_comment(line: str) -> bool:
+    return line.lstrip().startswith("#")
+
+
 def _block_bounds(
     lines: list[str], name: str
-) -> tuple[int, int] | None:
-    start: int | None = None
+) -> tuple[int, int, list[str]] | None:
+    """Devuelve (inicio, siguiente_cabecera, cola) del bloque del perfil.
+
+    El inicio incluye los comentarios pegados a la cabecera. La cola son los
+    blancos y comentarios que introducen el perfil siguiente; se reinserta tal
+    cual para no borrarlos al actualizar o eliminar el bloque anterior.
+    """
+    header: int | None = None
     for index, line in enumerate(lines):
         if _header_name(line) == name:
-            start = index
+            header = index
             break
-    if start is None:
+    if header is None:
         return None
+
+    start = header
+    while start > 0 and _is_comment(lines[start - 1]):
+        start -= 1
+
     end = len(lines)
-    for index in range(start + 1, len(lines)):
+    for index in range(header + 1, len(lines)):
         if lines[index].lstrip().startswith("["):
             end = index
             break
-    return start, end
+
+    last_content = header
+    for index in range(header, end):
+        line = lines[index]
+        if line.strip() and not _is_comment(line):
+            last_content = index
+    tail_start = last_content + 1
+    return start, end, lines[tail_start:end]
 
 
 def _replace_block(text: str, name: str, block: list[str]) -> str:
@@ -371,10 +401,10 @@ def _replace_block(text: str, name: str, block: list[str]) -> str:
     bounds = _block_bounds(lines, name)
     if bounds is None:
         raise ProfilesError(f"no se encontró el bloque del perfil {name!r}")
-    start, end = bounds
+    start, end, tail = bounds
     newline = _newline_for(text)
     replacement = [line + newline for line in block]
-    return "".join(lines[:start] + replacement + lines[end:])
+    return "".join(lines[:start] + replacement + tail + lines[end:])
 
 
 def _append_block(text: str, block: list[str]) -> str:
@@ -392,11 +422,17 @@ def _remove_block(text: str, name: str) -> str:
     bounds = _block_bounds(lines, name)
     if bounds is None:
         raise ProfilesError(f"no se encontró el bloque del perfil {name!r}")
-    start, end = bounds
-    return "".join(lines[:start] + lines[end:])
+    start, end, tail = bounds
+    head = lines[:start]
+    tail = list(tail)
+    if head and not head[-1].strip() and tail and not tail[0].strip():
+        tail.pop(0)
+    return "".join(head + tail + lines[end:])
 
 
-_DEFAULT_LINE = re.compile(r"(?m)^[ \t]*default[ \t]*=.*(?:\r?\n|$)")
+_DEFAULT_LINE = re.compile(
+    r"""(?m)^[ \t]*(?:default|"default"|'default')[ \t]*=[^\r\n]*(?:\r?\n|$)"""
+)
 
 
 def _set_default(text: str, default: str | None) -> str:
@@ -409,7 +445,7 @@ def _set_default(text: str, default: str | None) -> str:
     line = f"default = {_toml_string(default)}{newline}"
     if match is not None:
         return text[: match.start()] + line + text[match.end() :]
-    return line + newline + text
+    return line + text
 
 
 def add_profile(
@@ -424,7 +460,7 @@ def add_profile(
     """
     target = Path(path).expanduser()
     if target.exists():
-        original = target.read_text(encoding="utf-8")
+        original = _read_text(target)
         loaded = load_profiles(target)
     else:
         original = ""
@@ -456,7 +492,7 @@ def update_profile(
 ) -> Profiles:
     """Reemplaza solo el bloque del perfil, conservando el resto byte a byte."""
     target = Path(path).expanduser()
-    original = target.read_text(encoding="utf-8")
+    original = _read_text(target)
     loaded = load_profiles(target)
     name = profile.name
     if name not in loaded.profiles:
@@ -476,7 +512,7 @@ def delete_profile(
 ) -> Profiles:
     """Elimina solo el bloque del perfil y reasigna el `default` si era ese."""
     target = Path(path).expanduser()
-    original = target.read_text(encoding="utf-8")
+    original = _read_text(target)
     loaded = load_profiles(target)
     if name not in loaded.profiles:
         raise ProfilesError(f"no existe el perfil {name!r} en {target}")
