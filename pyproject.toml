@@ -10,11 +10,17 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+tui = ["textual>=0.80"]
+
 [project.scripts]
 vvm = "vvm.cli:main"
 
 [tool.setuptools]
-packages = ["vvm"]
+packages = ["vvm", "vvm.tui"]
+
+[tool.setuptools.package-data]
+"vvm.tui" = ["app.tcss"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

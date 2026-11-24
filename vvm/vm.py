@@ -16,6 +16,10 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+# Binario de QEMU por defecto. La TUI lo recibe del CLI o usa esta constante,
+# sin repetir el nombre del ejecutable en su propio código.
+DEFAULT_QEMU = "qemu-system-x86_64"
+
 # Marcador que identifica el backend de memoria de una sesión VVM en `cmdline`.
 SESSION_MARKER = "memory-backend-memfd,id=mem"
 
@@ -42,6 +46,9 @@ class VmConfig:
     cpus: int = 1
     headless: bool = False
     serial_log: str | None = None
+    # "stdio" conserva la línea del CLI; "file" manda el monitor y la consola
+    # serie a un fichero para que la TUI pueda usar el terminal.
+    serial_mode: str = "stdio"
 
 
 def _validate_config(config: VmConfig) -> None:
@@ -73,6 +80,16 @@ def _validate_config(config: VmConfig) -> None:
             "El modo headless necesita un log serie (--log): "
             "sin fichero de salida la consola del guest se perdería"
         )
+    if config.serial_mode not in {"stdio", "file"}:
+        raise ValueError(
+            f"serial_mode desconocido: {config.serial_mode!r} "
+            "(válidos: 'stdio', 'file')"
+        )
+    if config.serial_mode == "file" and not config.serial_log:
+        raise ValueError(
+            "serial_mode='file' necesita un log serie (serial_log): "
+            "sin fichero de salida la consola del guest se perdería"
+        )
     if config.mem_mb <= 0:
         raise ValueError(f"--mem debe ser mayor que cero: {config.mem_mb} MB")
     if config.disk_mb < 0:
@@ -84,7 +101,7 @@ def _validate_config(config: VmConfig) -> None:
 def build_cmd(
     config: VmConfig,
     disk_fd: int | str | None = None,
-    qemu: str = "qemu-system-x86_64",
+    qemu: str = DEFAULT_QEMU,
     *,
     image_fd: int | str | None = None,
 ) -> list[str]:
@@ -142,9 +159,16 @@ def build_cmd(
             "none",
             "-display",
             "gtk",
-            "-serial",
-            "mon:stdio",
         ]
+        if config.serial_mode == "file":
+            cmd += [
+                "-monitor",
+                "none",
+                "-serial",
+                f"file:{config.serial_log}",
+            ]
+        else:
+            cmd += ["-serial", "mon:stdio"]
         return cmd
 
     cmd += [
@@ -161,7 +185,7 @@ def build_cmd(
             f"file=/dev/fd/{disk_fd},format=raw,if=virtio,cache=writethrough",
         ]
     cmd += ["-nic", "none", "-display", "none"]
-    if config.headless:
+    if config.serial_mode == "file" or config.headless:
         cmd += ["-monitor", "none", "-serial", f"file:{config.serial_log}"]
     else:
         cmd += ["-serial", "mon:stdio"]
