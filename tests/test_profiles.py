@@ -473,7 +473,7 @@ def test_add_profile_valida_antes_de_escribir(tmp_path: Path):
     assert not target.exists()
 
 
-def test_default_roto_pasa_al_perfil_nuevo(tmp_path: Path):
+def test_default_roto_se_conserva_al_anadir(tmp_path: Path):
     target = _write_profiles(
         tmp_path,
         """
@@ -489,7 +489,10 @@ image = "live.iso"
         profiles.Profile(name="nuevo", kernel="/k", initrd="/i"),
     )
 
-    assert saved.default == "nuevo"
+    assert saved.default == "nope"
+    reloaded = profiles.load_profiles(target)
+    assert reloaded.default == "nope"
+    assert reloaded.default_warning is not None
 
 
 def test_update_profile_conserva_el_resto_y_el_default(tmp_path: Path):
@@ -627,3 +630,199 @@ initrd = "initramfs"
         profiles.delete_profile(target, "nope")
 
     assert target.read_text(encoding="utf-8") == original
+
+
+def test_add_profile_conserva_comentarios_orden_y_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    target = tmp_path / "profiles.toml"
+    original = (
+        "# cabecera del fichero\n"
+        "\n"
+        "[profiles.kali]\n"
+        "# comentario del perfil kali\n"
+        'image = "~/isos/x.iso"\n'
+        "mem_mb = 2048\n"
+        "\n"
+        "[profiles.min]\n"
+        "# comentario del perfil min\n"
+        'kernel = "~/vmlinuz"\n'
+        'initrd = "~/initramfs"\n'
+    )
+    target.write_text(original, encoding="utf-8")
+
+    profiles.add_profile(
+        target,
+        profiles.Profile(
+            name="nuevo",
+            kernel=str(home / "otro-kernel"),
+            initrd=str(home / "otro-initrd"),
+            disk_mb=0,
+        ),
+    )
+
+    text = target.read_text(encoding="utf-8")
+    assert text.startswith(original)
+    assert "# cabecera del fichero" in text
+    assert "# comentario del perfil min" in text
+    assert 'image = "~/isos/x.iso"' in text
+    assert 'kernel = "~/otro-kernel"' in text
+    assert "default" not in text
+    assert profiles.load_profiles(target).default is None
+
+
+def test_update_profile_solo_cambia_su_bloque_y_conserva_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    target = tmp_path / "profiles.toml"
+    target.write_text(
+        (
+            "# cabecera\n"
+            "\n"
+            "[profiles.kali]\n"
+            'image = "~/isos/x.iso"\n'
+            "mem_mb = 2048\n"
+            "\n"
+            "[profiles.min]\n"
+            "# min intacto\n"
+            'kernel = "~/vmlinuz"\n'
+            'initrd = "~/initramfs"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    profiles.update_profile(
+        target,
+        profiles.Profile(
+            name="kali",
+            image=str(home / "isos" / "x.iso"),
+            mem_mb=4096,
+            disk_mb=0,
+        ),
+    )
+
+    text = target.read_text(encoding="utf-8")
+    assert "# cabecera" in text
+    assert "# min intacto" in text
+    assert 'image = "~/isos/x.iso"' in text
+    assert "mem_mb = 4096" in text
+    assert text.index("[profiles.kali]") < text.index("[profiles.min]")
+
+
+def test_delete_profile_solo_quita_su_bloque_y_conserva_comentarios(
+    tmp_path: Path,
+):
+    target = tmp_path / "profiles.toml"
+    target.write_text(
+        (
+            "# cabecera\n"
+            "\n"
+            "[profiles.kali]\n"
+            "# kali intacto\n"
+            'image = "~/isos/x.iso"\n'
+            "\n"
+            "[profiles.min]\n"
+            'kernel = "~/vmlinuz"\n'
+            'initrd = "~/initramfs"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    profiles.delete_profile(target, "min")
+
+    text = target.read_text(encoding="utf-8")
+    assert "# cabecera" in text
+    assert "# kali intacto" in text
+    assert 'image = "~/isos/x.iso"' in text
+    assert "[profiles.min]" not in text
+
+
+def test_delete_sin_default_no_inventa_uno(tmp_path: Path):
+    target = tmp_path / "profiles.toml"
+    target.write_text(
+        (
+            "# sin default\n"
+            "[profiles.a]\n"
+            'image = "/tmp/a.iso"\n'
+            "\n"
+            "[profiles.b]\n"
+            'image = "/tmp/b.iso"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    saved = profiles.delete_profile(target, "a")
+
+    text = target.read_text(encoding="utf-8")
+    assert "default =" not in text
+    assert saved.default is None
+    assert profiles.load_profiles(target).default is None
+
+
+def test_delete_con_default_roto_lo_deja_como_esta(tmp_path: Path):
+    target = tmp_path / "profiles.toml"
+    target.write_text(
+        (
+            'default = "nope"\n'
+            "\n"
+            "[profiles.a]\n"
+            'image = "/tmp/a.iso"\n'
+            "\n"
+            "[profiles.b]\n"
+            'image = "/tmp/b.iso"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    saved = profiles.delete_profile(target, "a")
+
+    text = target.read_text(encoding="utf-8")
+    assert 'default = "nope"' in text
+    assert saved.default == "nope"
+    assert profiles.load_profiles(target).default_warning is not None
+
+
+def test_load_profiles_rechaza_image_con_serial_log(tmp_path: Path):
+    target = _write_profiles(
+        tmp_path,
+        """
+[profiles.roto]
+image = "live.iso"
+serial_log = "serie.log"
+""",
+    )
+
+    with pytest.raises(profiles.ProfilesError, match="serial_log"):
+        profiles.load_profiles(target)
+
+
+def test_run_profile_image_con_serial_log_sale_2_sin_lanzar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    _env(monkeypatch, tmp_path)
+    _write_profiles(
+        tmp_path,
+        """
+[profiles.roto]
+image = "live.iso"
+serial_log = "serie.log"
+""",
+    )
+
+    def boom(*args, **kwargs):
+        raise AssertionError("no debe lanzarse nada")
+
+    monkeypatch.setattr(cli.images, "create_disk_fd", boom)
+    monkeypatch.setattr(cli.images, "create_image_fd", boom)
+
+    assert cli.main(["run", "--profile", "roto", "--dry-run"]) == 2
+
+    err = capsys.readouterr().err
+    assert "serial_log" in err
+    assert "excluyentes" in err

@@ -537,3 +537,55 @@ def test_borrar_el_default_reasigna_el_siguiente(
     loaded = profiles.load_profiles(target)
     assert set(loaded.profiles) == {"live"}
     assert loaded.default == "live"
+
+
+def test_la_sesion_respeta_el_wipe_del_perfil(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    target = _profiles_file(tmp_path)
+    kernel, initrd = _boot(tmp_path)
+    profiles.update_profile(
+        target,
+        profiles.Profile(
+            name="min",
+            kernel=str(kernel),
+            initrd=str(initrd),
+            mem_mb=256,
+            disk_mb=8,
+            wipe=True,
+        ),
+    )
+    marker = tmp_path / "qemu.pid"
+    qemu = _fake_qemu(
+        tmp_path,
+        (
+            "sleep 0.3\n"
+            f"echo $$ > {marker}\n"
+            "trap 'exit 0' TERM\n"
+            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
+        ),
+    )
+    app = VvmApp(
+        profiles_path=target,
+        qemu=str(qemu),
+        refresh_interval=0.05,
+        auto_exit_on_finish=False,
+    )
+    try:
+
+        async def run() -> None:
+            async with app.run_test(size=(110, 40)) as pilot:
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                _wait_for(marker)
+                await pilot.press("s")
+
+        asyncio.run(run())
+        assert app.last_report is not None
+        assert "Wipe: 8 MiB" in app.last_report
+    finally:
+        _kill_marked_child(marker)

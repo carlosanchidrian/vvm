@@ -252,20 +252,33 @@ def _toml_key(name: str) -> str:
     return name if _BARE_KEY.match(name) else _toml_string(name)
 
 
+def _shorten_home(value: str) -> str:
+    """Escribe bajo `~` las rutas que viven dentro del HOME del usuario."""
+    home = str(Path.home())
+    if value == home:
+        return "~"
+    prefix = home + os.sep
+    if value.startswith(prefix):
+        return "~" + value[len(home):]
+    return value
+
+
 def _profile_lines(profile: Profile) -> list[str]:
     lines = [f"[profiles.{_toml_key(profile.name)}]"]
     if profile.image is not None:
-        lines.append(f"image = {_toml_string(profile.image)}")
+        lines.append(f"image = {_toml_string(_shorten_home(profile.image))}")
     if profile.kernel is not None:
-        lines.append(f"kernel = {_toml_string(profile.kernel)}")
+        lines.append(f"kernel = {_toml_string(_shorten_home(profile.kernel))}")
     if profile.initrd is not None:
-        lines.append(f"initrd = {_toml_string(profile.initrd)}")
+        lines.append(f"initrd = {_toml_string(_shorten_home(profile.initrd))}")
     lines.append(f"mem_mb = {profile.mem_mb}")
     lines.append(f"disk_mb = {profile.disk_mb}")
     lines.append(f"cpus = {profile.cpus}")
     lines.append(f"headless = {'true' if profile.headless else 'false'}")
     if profile.serial_log is not None:
-        lines.append(f"serial_log = {_toml_string(profile.serial_log)}")
+        lines.append(
+            f"serial_log = {_toml_string(_shorten_home(profile.serial_log))}"
+        )
     lines.append(f"wipe = {'true' if profile.wipe else 'false'}")
     return lines
 
@@ -282,15 +295,7 @@ def dump_profiles(profiles_file: Profiles) -> str:
     return "\n".join(lines) + "\n"
 
 
-def save_profiles(
-    profiles_file: Profiles,
-    path: Path | str | None = None,
-) -> Path:
-    """Guarda todos los perfiles de forma atómica, creando el directorio."""
-    target = Path(path).expanduser() if path is not None else profiles_file.path
-    for profile in profiles_file.profiles.values():
-        vm._validate_config(profile.to_config())
-    text = dump_profiles(profiles_file)
+def _atomic_write(target: Path, text: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(
         prefix=".profiles.",
@@ -310,23 +315,119 @@ def save_profiles(
         except OSError:
             pass
         raise
+
+
+def save_profiles(
+    profiles_file: Profiles,
+    path: Path | str | None = None,
+) -> Path:
+    """Guarda todos los perfiles de forma atómica, creando el directorio."""
+    target = Path(path).expanduser() if path is not None else profiles_file.path
+    for profile in profiles_file.profiles.values():
+        vm._validate_config(profile.to_config())
+    _atomic_write(target, dump_profiles(profiles_file))
     return target
+
+
+def _newline_for(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _header_name(line: str) -> str | None:
+    """Nombre del perfil si la línea es una cabecera `[profiles.<clave>]`."""
+    stripped = line.strip()
+    if not stripped.startswith("[profiles."):
+        return None
+    try:
+        document = tomllib.loads(stripped)
+    except tomllib.TOMLDecodeError:
+        return None
+    table = document.get("profiles")
+    if isinstance(table, dict) and len(table) == 1:
+        return next(iter(table))
+    return None
+
+
+def _block_bounds(
+    lines: list[str], name: str
+) -> tuple[int, int] | None:
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if _header_name(line) == name:
+            start = index
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].lstrip().startswith("["):
+            end = index
+            break
+    return start, end
+
+
+def _replace_block(text: str, name: str, block: list[str]) -> str:
+    lines = text.splitlines(keepends=True)
+    bounds = _block_bounds(lines, name)
+    if bounds is None:
+        raise ProfilesError(f"no se encontró el bloque del perfil {name!r}")
+    start, end = bounds
+    newline = _newline_for(text)
+    replacement = [line + newline for line in block]
+    return "".join(lines[:start] + replacement + lines[end:])
+
+
+def _append_block(text: str, block: list[str]) -> str:
+    newline = _newline_for(text)
+    prefix = text
+    if prefix and not prefix.endswith(("\n", "\r")):
+        prefix += newline
+    if prefix.strip():
+        prefix += newline
+    return prefix + newline.join(block) + newline
+
+
+def _remove_block(text: str, name: str) -> str:
+    lines = text.splitlines(keepends=True)
+    bounds = _block_bounds(lines, name)
+    if bounds is None:
+        raise ProfilesError(f"no se encontró el bloque del perfil {name!r}")
+    start, end = bounds
+    return "".join(lines[:start] + lines[end:])
+
+
+_DEFAULT_LINE = re.compile(r"(?m)^[ \t]*default[ \t]*=.*(?:\r?\n|$)")
+
+
+def _set_default(text: str, default: str | None) -> str:
+    newline = _newline_for(text)
+    match = _DEFAULT_LINE.search(text)
+    if default is None:
+        if match is None:
+            return text
+        return text[: match.start()] + text[match.end() :]
+    line = f"default = {_toml_string(default)}{newline}"
+    if match is not None:
+        return text[: match.start()] + line + text[match.end() :]
+    return line + newline + text
 
 
 def add_profile(
     path: Path | str,
     profile: Profile,
 ) -> Profiles:
-    """Añade un perfil y guarda el TOML, sin pisar uno con el mismo nombre.
+    """Añade un perfil al final del TOML sin reescribir el resto del fichero.
 
     Si el fichero no existe, se crea con el perfil nuevo como `default`. Si ya
-    existe, se conservan el resto de perfiles y el `default` válido; un
-    `default` roto pasa a apuntar al perfil nuevo.
+    existe, se conservan comentarios, orden y el `default` tal cual; solo se
+    añade el bloque nuevo.
     """
     target = Path(path).expanduser()
     if target.exists():
+        original = target.read_text(encoding="utf-8")
         loaded = load_profiles(target)
     else:
+        original = ""
         loaded = Profiles(path=target, profiles={}, default=None)
 
     name = profile.name
@@ -339,19 +440,23 @@ def add_profile(
     updated = dict(loaded.profiles)
     updated[name] = profile
     default = loaded.default
-    if default not in updated:
+    if default is None and not loaded.profiles:
         default = name
-    saved = Profiles(path=target, profiles=updated, default=default)
-    save_profiles(saved)
-    return saved
+    text = original
+    if default != loaded.default:
+        text = _set_default(text, default)
+    text = _append_block(text, _profile_lines(profile))
+    _atomic_write(target, text)
+    return Profiles(path=target, profiles=updated, default=default)
 
 
 def update_profile(
     path: Path | str,
     profile: Profile,
 ) -> Profiles:
-    """Reemplaza un perfil existente conservando el resto y el `default`."""
+    """Reemplaza solo el bloque del perfil, conservando el resto byte a byte."""
     target = Path(path).expanduser()
+    original = target.read_text(encoding="utf-8")
     loaded = load_profiles(target)
     name = profile.name
     if name not in loaded.profiles:
@@ -360,20 +465,18 @@ def update_profile(
 
     updated = dict(loaded.profiles)
     updated[name] = profile
-    default = loaded.default
-    if default not in updated:
-        default = next(iter(sorted(updated)), None)
-    saved = Profiles(path=target, profiles=updated, default=default)
-    save_profiles(saved)
-    return saved
+    text = _replace_block(original, name, _profile_lines(profile))
+    _atomic_write(target, text)
+    return Profiles(path=target, profiles=updated, default=loaded.default)
 
 
 def delete_profile(
     path: Path | str,
     name: str,
 ) -> Profiles:
-    """Elimina un perfil y reasigna el `default` si era el borrado."""
+    """Elimina solo el bloque del perfil y reasigna el `default` si era ese."""
     target = Path(path).expanduser()
+    original = target.read_text(encoding="utf-8")
     loaded = load_profiles(target)
     if name not in loaded.profiles:
         raise ProfilesError(f"no existe el perfil {name!r} en {target}")
@@ -381,8 +484,10 @@ def delete_profile(
     updated = dict(loaded.profiles)
     del updated[name]
     default = loaded.default
-    if default not in updated:
+    if default == name:
         default = next(iter(sorted(updated)), None)
-    saved = Profiles(path=target, profiles=updated, default=default)
-    save_profiles(saved)
-    return saved
+    text = _remove_block(original, name)
+    if default != loaded.default:
+        text = _set_default(text, default)
+    _atomic_write(target, text)
+    return Profiles(path=target, profiles=updated, default=default)

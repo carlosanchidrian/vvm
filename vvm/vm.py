@@ -65,6 +65,11 @@ def _validate_config(config: VmConfig) -> None:
             "pinta su menú en la consola VGA y sin pantalla la sesión se queda "
             "parada ahí"
         )
+    if has_image and config.serial_log and config.serial_mode == "stdio":
+        raise ValueError(
+            "--image y serial_log son excluyentes en modo stdio: "
+            "el live se pilota en la ventana y no tiene consola serie"
+        )
     if not has_image:
         if has_kernel and not has_initrd:
             raise ValueError("--kernel sin --initrd")

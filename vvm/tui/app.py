@@ -157,7 +157,6 @@ class VvmApp(App):
         *,
         forced: bool,
     ) -> None:
-        del profile
         current = self.session_factory(
             config,
             qemu=self.qemu,
@@ -184,6 +183,7 @@ class VvmApp(App):
             SessionScreen(
                 current,
                 warnings,
+                profile=profile,
                 refresh_interval=self.refresh_interval,
             )
         )

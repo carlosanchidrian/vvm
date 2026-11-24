@@ -228,7 +228,7 @@ class ProfileFormScreen(Screen):
                 value=str(editing.cpus if editing else 1),
                 id="profile-cpus",
             )
-            yield Label("Log serie (opcional)")
+            yield Label("Log serie (solo CLI)")
             yield Input(
                 value=editing.serial_log or "" if editing else "",
                 placeholder="~/vvm-logs/serie.log",
@@ -293,8 +293,6 @@ class ProfileFormScreen(Screen):
             initrd = ""
             if headless:
                 raise ValueError("El modo ISO no admite headless")
-            if serial_log:
-                raise ValueError("El modo ISO no usa log serie")
         else:
             if not kernel or not initrd:
                 raise ValueError("La fuente kernel necesita kernel e initrd")
@@ -384,6 +382,7 @@ class DeleteProfileScreen(Screen):
         yield Footer()
 
     def action_confirm(self) -> None:
+        previous_default = self.profiles_file.default
         try:
             saved = profiles.delete_profile(
                 self.profiles_file.path, self.profile.name
@@ -391,6 +390,13 @@ class DeleteProfileScreen(Screen):
         except (OSError, profiles.ProfilesError) as exc:
             self.query_one("#delete-error", Static).update(f"Error: {exc}")
             return
+        if previous_default == self.profile.name:
+            if saved.default is None:
+                self.app.notify("No queda ningún perfil por defecto")
+            else:
+                self.app.notify(
+                    f"El perfil por defecto pasa a ser {saved.default!r}"
+                )
         self.app.show_profiles(profiles_file=saved)
 
     def action_cancel(self) -> None:
@@ -529,13 +535,14 @@ class SessionScreen(Screen):
         session: Session,
         warnings: Sequence[CheckResult],
         *,
+        profile: profiles.Profile | None = None,
         refresh_interval: float | None = None,
     ) -> None:
         super().__init__()
         self.session = session
         self.warnings = tuple(warnings)
         self.refresh_interval = refresh_interval
-        self.wipe = False
+        self.wipe = bool(profile.wipe) if profile is not None else False
         self._finished = False
         self._timer = None
 

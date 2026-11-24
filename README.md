@@ -77,9 +77,11 @@ flags `--mem`, `--disk`, `--cpus` y `--wipe` sobrescriben el perfil; `--image`,
 `--kernel` o `--initrd` junto a `--profile` son un error (la fuente la decide el
 perfil). Un perfil inexistente o un TOML ausente salen con código 2 y explican
 qué ruta o qué nombres se esperaban. La TUI permite crear, editar y eliminar
-perfiles con `n`, `e` y `d`; los guarda en ese mismo fichero y, si aún no
-existe, lo crea. Al borrar el `default`, pasa a serlo el primer perfil
-alfabético que quede.
+perfiles con `n`, `e` y `d`; guarda solo el bloque afectado, así que conserva
+comentarios, orden y las rutas bajo `$HOME` como `~/`. Al borrar el `default`,
+pasa a serlo el primer perfil alfabético que quede; si el fichero no tenía
+`default`, no se inventa, y un `default` roto se deja como está para que
+`default_warning` lo declare.
 
 ### `vvm run` — la sesión
 
@@ -261,5 +263,5 @@ vvm/
 ├── cli.py          # argparse: check | run | audit | profiles | tui
 ├── tui/            # Textual opcional: app, pantallas, widgets y CSS
 └── __main__.py     # python3 -m vvm
-tests/              # 251 tests, sin KVM
+tests/              # 259 tests, sin KVM
 ```
