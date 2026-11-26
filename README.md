@@ -5,8 +5,9 @@ solo en memoria**. El disco del guest y la imagen ISO son `memfd` que se pasan
 como descriptores de fichero: no hay ruta en disco ni entrada en `/dev/shm`. Al
 cerrar la sesión, la RAM, el disco y el medio del guest desaparecen con ella.
 
-Sin dependencias externas: solo biblioteca estándar de Python 3.11+ y QEMU/KVM
-para una sesión real.
+Sin dependencias externas en el CLI: solo biblioteca estándar de Python 3.11+ y
+QEMU/KVM para una sesión real. La TUI es un extra opcional (`textual>=0.80`):
+sin él, `check`, `run`, `audit` y `profiles` funcionan igual.
 
 ## Requisitos
 
@@ -14,6 +15,7 @@ para una sesión real.
 - Python 3.11 o superior.
 - No hace falta instalar nada: `python3 -m vvm …` funciona desde el repo.
   Opcionalmente, `pip install .` instala el comando `vvm`.
+- Para la TUI: `pip install -e '.[tui]'`.
 
 ## Uso
 
@@ -38,11 +40,55 @@ o rojo (falla); el color se desactiva solo si la salida no es un TTY o si
 defines `NO_COLOR`. La salida `--json` y el informe conservan además un
 identificador interno por comprobación.
 
+### `vvm profiles` — perfiles de escenario
+
+```bash
+python3 -m vvm profiles [--json]
+```
+
+Lee `$XDG_CONFIG_HOME/vvm/profiles.toml` (por defecto
+`~/.config/vvm/profiles.toml`) y lista cada perfil con su fuente (`ISO` o
+`kernel`), RAM, disco y red (siempre `none`). Las rutas del TOML expanden `~` y
+las relativas se resuelven respecto al directorio del propio fichero. Una clave
+desconocida es un error: se listan las válidas y el fichero, sin ignorar erratas.
+La validación de combinaciones se delega en la misma que usa `run`.
+
+```toml
+default = "kali"
+
+[profiles.kali]
+image    = "~/isos/kali-linux-2026.3-live.iso"
+mem_mb   = 4096
+disk_mb  = 256
+cpus     = 2
+wipe     = true
+
+[profiles.alpine-min]
+kernel     = "~/developing/vvm/poc/vmlinuz-virt"
+initrd     = "~/developing/vvm/poc/initramfs-virt"
+mem_mb     = 512
+disk_mb    = 256
+headless   = false
+serial_log = "~/vvm-logs/alpine.log"
+```
+
+`vvm run --profile NOMBRE` y `vvm check --profile NOMBRE` usan ese perfil. Los
+flags `--mem`, `--disk`, `--cpus` y `--wipe` sobrescriben el perfil; `--image`,
+`--kernel` o `--initrd` junto a `--profile` son un error (la fuente la decide el
+perfil). Un perfil inexistente o un TOML ausente salen con código 2 y explican
+qué ruta o qué nombres se esperaban. La TUI permite crear, editar y eliminar
+perfiles con `n`, `e` y `d`; guarda solo el bloque afectado, así que conserva
+los comentarios y el orden del resto del fichero, y las rutas bajo `$HOME` como
+`~/`. Al borrar el `default`,
+pasa a serlo el primer perfil alfabético que quede; si el fichero no tenía
+`default`, no se inventa, y un `default` roto se deja como está para que
+`default_warning` lo declare.
+
 ### `vvm run` — la sesión
 
 ```bash
 python3 -m vvm run \
-  (--image live.iso | --kernel vmlinuz-virt --initrd initramfs-virt) \
+  (--image live.iso | --kernel vmlinuz-virt --initrd initramfs-virt | --profile NOMBRE) \
   [--mem 512] [--disk 256] [--cpus 1] [--wipe] \
   [--headless --log /tmp/vvm-serial.log] \
   [--report informe.txt] [--qemu qemu-system-x86_64] \
@@ -115,6 +161,39 @@ Detalles:
   foto del cierre, no una promesa sobre los últimos milisegundos.
 - Para salir de una sesión interactiva: **Ctrl-A x**.
 
+### `vvm tui` — interfaz de terminal
+
+```bash
+pip install -e '.[tui]'
+python3 -m vvm tui [--profile NOMBRE]
+```
+
+Abre la TUI de Textual. Es un front-end: no construye la línea de QEMU ni abre
+rutas del sistema; usa `session`, `host_check`, `audit` e `images`, los mismos
+módulos que el CLI. Sin terminal interactivo o sin el extra, sale con código 2 y
+explica qué falta; el resto de subcomandos siguen funcionando sin Textual.
+
+Pantallas y teclas:
+
+- **Perfiles**: `enter` arrancar, `c` pre-chequeo sin arrancar, `n` crear un
+  perfil, `e` editar el seleccionado, `d` eliminarlo (con confirmación),
+  `a` último informe y `q` salir. Si el TOML no existe, la pantalla se abre
+  vacía y `n` permite crear el primero; el formulario valida las mismas reglas
+  que `run` y guarda los cambios de forma atómica. Un nombre duplicado se
+  rechaza sin sobrescribir y el nombre no se cambia al editar.
+- **Pre-chequeo**: P1-P10 con estado, evidencia y remedio; `enter` seguir,
+  `f` forzar, `r` repetir y `esc` volver.
+- **Sesión**: estado, PID, tiempo, `write_bytes` destacado, `wchar`/`rchar`/
+  `read_bytes`, Δ`Shmem`, Δ`MemAvailable`, entradas nuevas en `/dev/shm` y
+  memfds atribuidos al guest. Teclas: `s` parar (SIGTERM), `l` log serie,
+  `w` alternar wipe y `q` cerrar emitiendo el informe.
+- **Informe**: el texto de `build_report()` tal cual, con desplazamiento;
+  `g` guardar, `y` copiar y `esc` volver.
+
+En la TUI la consola serie va a un fichero en `$XDG_RUNTIME_DIR/vvm/serie.log`
+(tmpfs), no a stdio: la pantalla es de la TUI. Por eso en modo imagen no se usa
+`Ctrl-A x`; se sale con `s` o `q`, que paran la VM y emiten el informe.
+
 ### `vvm audit` — informe de una sesión
 
 ```bash
@@ -124,8 +203,9 @@ python3 -m vvm audit [--session RUTA]
 Sin `--session`, lee la última sesión guardada por `run`. Imprime el informe
 determinista: pre-chequeo de la sesión (sección 0), entradas nuevas en `/dev/shm`,
 memfds nuevos comparados con la línea base —los del escritorio
-(`displaysurface`, `wayland-cursor`, `pulseaudio`) se declaran como pila del
-anfitrión, no del guest—, procesos QEMU de esa sesión vivos al cierre, deltas de
+(`displaysurface`, `wayland-cursor`, `pulseaudio` y los `pipewire-*`) se
+declaran como pila del anfitrión, no del guest—, procesos QEMU de esa sesión
+vivos al cierre, deltas de
 Shmem/MemAvailable, contadores de I/O de QEMU leídos con la VM viva, cierre y
 resultado de `--wipe`, log serie declarado y las exclusiones de alcance. En una
 sesión con ventana, si `write_bytes` no es cero el informe lo declara como I/O
@@ -166,7 +246,8 @@ así que al reconstruir el informe desde `audit` la sección del log sale vacía
 ## Desarrollo
 
 ```bash
-python3 -m pytest -q          # suite completa (sin KVM ni QEMU real)
+python3 -m pytest -q          # suite completa sin KVM (la TUI se salta sin textual)
+.venv/bin/python -m pytest -q # suite completa con el extra [tui]
 python3 -m vvm check          # contra el host actual
 python3 -m vvm run --kernel … --initrd … --dry-run
 ```
@@ -178,8 +259,11 @@ vvm/
 ├── host_check.py   # comprobaciones del anfitrión con lectores sustituibles
 ├── images.py       # disco memfd + validación de kernel/initrd
 ├── vm.py           # línea de QEMU y ciclo de vida
+├── session.py      # start/poll/stop/io/finish reutilizable por CLI y TUI
+├── profiles.py     # perfiles TOML y validación delegada en vm
 ├── audit.py        # snapshots, informe y sesión en JSON
-├── cli.py          # argparse: check | run | audit
+├── cli.py          # argparse: check | run | audit | profiles | tui
+├── tui/            # Textual opcional: app, pantallas, widgets y CSS
 └── __main__.py     # python3 -m vvm
-tests/              # 197 tests, sin KVM
+tests/              # 269 tests, sin KVM
 ```

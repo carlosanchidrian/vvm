@@ -366,12 +366,12 @@ def test_run_emite_informe_si_se_interrumpe(host_ok, monkeypatch, tmp_path, caps
     session = tmp_path / "sesion.json"
     _stub_session(monkeypatch, session)
 
-    def interrupted(cmd, pass_fds=(), **kwargs):
+    def interrupted(self, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.vm, "run_session", interrupted)
+    monkeypatch.setattr(cli.session.Session, "wait", interrupted)
 
-    assert cli.main(_run_args(kernel, initrd)) == 130
+    assert cli.main(_run_args(kernel, initrd, "--qemu", "/bin/true")) == 130
 
     captured = capsys.readouterr()
     assert "SIN HALLAZGOS EN LO COMPROBADO" in captured.out
@@ -384,12 +384,12 @@ def test_run_force_ignora_bloqueos(host_ok, monkeypatch, tmp_path, capsys):
     _stub_session(monkeypatch, session)
     monkeypatch.setattr(host_check, "read_swaps", lambda: SWAP_ACTIVE)
     monkeypatch.setattr(
-        cli.vm,
-        "run_session",
-        lambda cmd, pass_fds=(), **kwargs: cli.vm.RunOutcome(returncode=0),
+        cli.session.Session,
+        "wait",
+        lambda self, **kwargs: cli.session.SessionOutcome(returncode=0),
     )
 
-    assert cli.main(_run_args(kernel, initrd, "--force")) == 0
+    assert cli.main(_run_args(kernel, initrd, "--qemu", "/bin/true", "--force")) == 0
 
     captured = capsys.readouterr()
     assert "[FALLA]" in captured.out
@@ -602,12 +602,17 @@ def test_run_image_prechequeo_y_linea_base_van_antes_de_copiar(
 
     monkeypatch.setattr(cli.images, "create_image_fd", copy)
     monkeypatch.setattr(
-        cli.vm,
-        "run_session",
-        lambda cmd, pass_fds=(), **kwargs: cli.vm.RunOutcome(0),
+        cli.session.Session,
+        "wait",
+        lambda self, **kwargs: cli.session.SessionOutcome(0),
     )
 
-    assert cli.main(["run", "--image", str(iso), "--disk", "0"]) == 0
+    assert (
+        cli.main(
+            ["run", "--image", str(iso), "--disk", "0", "--qemu", "/bin/true"]
+        )
+        == 0
+    )
 
     assert events == ["precheck", "snapshot", "copy", "snapshot"]
 
@@ -637,12 +642,17 @@ def test_run_image_shmem_no_descuenta_el_iso(
 
     monkeypatch.setattr(cli.audit, "take_snapshot", snapshot)
     monkeypatch.setattr(
-        cli.vm,
-        "run_session",
-        lambda cmd, pass_fds=(), **kwargs: cli.vm.RunOutcome(0),
+        cli.session.Session,
+        "wait",
+        lambda self, **kwargs: cli.session.SessionOutcome(0),
     )
 
-    assert cli.main(["run", "--image", str(iso), "--disk", "0"]) == 0
+    assert (
+        cli.main(
+            ["run", "--image", str(iso), "--disk", "0", "--qemu", "/bin/true"]
+        )
+        == 0
+    )
 
     before, after = audit.load_session(session)
     assert before.shmem_kb == 100_000
@@ -1079,9 +1089,9 @@ def test_run_wipe_fallido_conserva_el_codigo_de_senal(
 
     monkeypatch.setattr(cli.images, "wipe_fd", failing)
     monkeypatch.setattr(
-        cli.vm,
-        "run_session",
-        lambda cmd, pass_fds=(), **kwargs: cli.vm.RunOutcome(
+        cli.session.Session,
+        "wait",
+        lambda self, **kwargs: cli.session.SessionOutcome(
             returncode=143, interrupt=signal.SIGTERM
         ),
     )

@@ -17,6 +17,7 @@ todo el teardown: una señal en el cierre no impide el informe ni la sesión.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shlex
@@ -26,7 +27,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from vvm import __version__, audit, host_check, images, vm
+from vvm import __version__, audit, host_check, images, profiles, session, vm
 from vvm.host_check import CheckResult
 
 # `vvm check` no arranca nada: estos nombres solo rellenan la línea que P7 y P9
@@ -46,21 +47,25 @@ def build_parser() -> argparse.ArgumentParser:
         description="VMs volátiles sobre QEMU/KVM: RAM y disco solo en memoria.",
     )
     parser.add_argument("--version", action="version", version=f"vvm {__version__}")
-    subparsers = parser.add_subparsers(dest="command", metavar="{check,run,audit}")
+    subparsers = parser.add_subparsers(
+        dest="command", metavar="{check,run,audit,profiles,tui}"
+    )
 
     check = subparsers.add_parser("check", help="pre-chequeo P1-P10 del anfitrión")
+    check.add_argument("--profile", metavar="NOMBRE", help="perfil de escenario")
     check.add_argument("--image", metavar="ISO", help="imagen ISO del live")
-    check.add_argument("--mem", type=int, default=512, metavar="MB")
-    check.add_argument("--disk", type=int, default=256, metavar="MB")
+    check.add_argument("--mem", type=int, default=None, metavar="MB")
+    check.add_argument("--disk", type=int, default=None, metavar="MB")
     check.add_argument("--json", action="store_true", help="salida legible por máquina")
 
     run = subparsers.add_parser("run", help="arranca una sesión")
+    run.add_argument("--profile", metavar="NOMBRE", help="perfil de escenario")
     run.add_argument("--image", metavar="ISO", help="imagen ISO del live (con ventana)")
     run.add_argument("--kernel", help="vmlinuz del guest")
     run.add_argument("--initrd", help="initramfs del guest")
-    run.add_argument("--mem", type=int, default=512, metavar="MB")
-    run.add_argument("--disk", type=int, default=256, metavar="MB")
-    run.add_argument("--cpus", type=int, default=1)
+    run.add_argument("--mem", type=int, default=None, metavar="MB")
+    run.add_argument("--disk", type=int, default=None, metavar="MB")
+    run.add_argument("--cpus", type=int, default=None)
     run.add_argument("--headless", action="store_true")
     run.add_argument(
         "--wipe",
@@ -73,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="log serie (solo --kernel/--initrd, obligatorio con --headless)",
     )
     run.add_argument("--report", metavar="RUTA", help="escribe el informe en un fichero")
-    run.add_argument("--qemu", default="qemu-system-x86_64")
+    run.add_argument("--qemu", default=vm.DEFAULT_QEMU)
     run.add_argument(
         "--dry-run",
         action="store_true",
@@ -91,7 +96,154 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="RUTA",
         help="sesión guardada (por defecto, la última de $XDG_STATE_HOME)",
     )
+
+    profiles_parser = subparsers.add_parser(
+        "profiles", help="lista los perfiles de escenario"
+    )
+    profiles_parser.add_argument(
+        "--json", action="store_true", help="salida legible por máquina"
+    )
+
+    tui_parser = subparsers.add_parser("tui", help="abre la interfaz de terminal")
+    tui_parser.add_argument("--profile", metavar="NOMBRE", help="perfil inicial")
+    tui_parser.add_argument(
+        "--qemu",
+        default=vm.DEFAULT_QEMU,
+        help="binario de QEMU (para pruebas o compilaciones propias)",
+    )
+    tui_parser.add_argument(
+        "--profiles",
+        metavar="RUTA",
+        help="fichero de perfiles alternativo (por defecto, el de XDG)",
+    )
+    tui_parser.add_argument(
+        "--refresh",
+        type=float,
+        default=None,
+        metavar="SEGUNDOS",
+        help="intervalo de refresco del panel de sesión",
+    )
     return parser
+
+
+def _apply_profile(args: argparse.Namespace) -> str | None:
+    """Resuelve `--profile` y los valores por defecto de los flags.
+
+    Este tramo distingue «flag no pasado» (`None`) de «flag con valor»: así el
+    perfil puede aportar sus valores y los flags explícitos siguen teniendo la
+    última palabra. Sin perfil, los valores son los de siempre.
+    """
+    profile_name = getattr(args, "profile", None)
+    if profile_name is None:
+        if getattr(args, "mem", None) is None:
+            args.mem = 512
+        if getattr(args, "disk", None) is None:
+            args.disk = 256
+        if getattr(args, "cpus", None) is None:
+            args.cpus = 1
+        if not hasattr(args, "headless"):
+            args.headless = False
+        if not hasattr(args, "wipe"):
+            args.wipe = False
+        if not hasattr(args, "log"):
+            args.log = None
+        return None
+
+    sources = [
+        option
+        for option in ("image", "kernel", "initrd")
+        if getattr(args, option, None)
+    ]
+    if sources:
+        flags = ", ".join(f"--{name}" for name in sources)
+        return (
+            f"--profile no se combina con {flags}: "
+            "la fuente de arranque la decide el perfil"
+        )
+
+    try:
+        loaded = profiles.load_profiles()
+        profile = loaded.get(profile_name)
+    except profiles.ProfilesError as exc:
+        return str(exc)
+
+    config = profile.to_config()
+    config = replace(
+        config,
+        mem_mb=(
+            args.mem if getattr(args, "mem", None) is not None else profile.mem_mb
+        ),
+        disk_mb=(
+            args.disk
+            if getattr(args, "disk", None) is not None
+            else profile.disk_mb
+        ),
+        cpus=(
+            args.cpus
+            if getattr(args, "cpus", None) is not None
+            else profile.cpus
+        ),
+        headless=(
+            bool(getattr(args, "headless", False)) or profile.headless
+        ),
+        serial_log=(
+            args.log
+            if getattr(args, "log", None) is not None
+            else profile.serial_log
+        ),
+    )
+    try:
+        vm._validate_config(config)
+    except ValueError as exc:
+        return f"perfil {profile_name!r} en {loaded.path}: {exc}"
+
+    args.image = config.image
+    args.kernel = config.kernel
+    args.initrd = config.initrd
+    args.mem = config.mem_mb
+    args.disk = config.disk_mb
+    args.cpus = config.cpus
+    args.headless = config.headless
+    args.log = config.serial_log
+    args.wipe = bool(getattr(args, "wipe", False)) or profile.wipe
+    return None
+
+
+def cmd_profiles(args: argparse.Namespace) -> int:
+    """Lista los perfiles del TOML, en texto o como JSON estable."""
+    try:
+        loaded = profiles.load_profiles()
+    except profiles.ProfilesError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    if loaded.default_warning:
+        print(f"Aviso: {loaded.default_warning}", file=sys.stderr)
+
+    entries = [
+        {
+            "name": profile.name,
+            "source": profile.source,
+            "mem_mb": profile.mem_mb,
+            "disk_mb": profile.disk_mb,
+            "network": "none",
+        }
+        for profile in sorted(loaded.profiles.values(), key=lambda item: item.name)
+    ]
+    if args.json:
+        print(json.dumps(entries, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    print(f"{'NOMBRE':<20} {'FUENTE':<8} {'RAM':>6} {'DISCO':>6} {'RED':<5}")
+    for entry in entries:
+        print(
+            f"{entry['name']:<20} {entry['source']:<8} "
+            f"{entry['mem_mb']:>6} {entry['disk_mb']:>6} {entry['network']:<5}"
+        )
+    print(f"Perfiles: {loaded.path}")
+    if loaded.default is not None:
+        print(f"Por defecto: {loaded.default}")
+    return 0
 
 
 def _stdout_supports_color() -> bool:
@@ -136,27 +288,40 @@ def _image_mb(size_bytes: int) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
+    profile_error = _apply_profile(args)
+    if profile_error is not None:
+        print(f"Error: {profile_error}", file=sys.stderr)
+        return 2
+
     image_mb = 0
     try:
         if args.image:
             image_mb = _image_mb(images.validate_image(args.image))
+            config = vm.VmConfig(
+                image=args.image,
+                mem_mb=args.mem,
+                disk_mb=args.disk,
+                cpus=args.cpus,
+                headless=args.headless,
+                serial_log=args.log,
+            )
             cmd = vm.build_cmd(
-                vm.VmConfig(
-                    image=args.image,
-                    mem_mb=args.mem,
-                    disk_mb=args.disk,
-                ),
+                config,
                 disk_fd=_PLACEHOLDER_FD if args.disk > 0 else None,
                 image_fd=_PLACEHOLDER_FD,
             )
         else:
+            config = vm.VmConfig(
+                kernel=getattr(args, "kernel", None) or _PLACEHOLDER_KERNEL,
+                initrd=getattr(args, "initrd", None) or _PLACEHOLDER_INITRD,
+                mem_mb=args.mem,
+                disk_mb=args.disk,
+                cpus=args.cpus,
+                headless=args.headless,
+                serial_log=args.log,
+            )
             cmd = vm.build_cmd(
-                vm.VmConfig(
-                    kernel=_PLACEHOLDER_KERNEL,
-                    initrd=_PLACEHOLDER_INITRD,
-                    mem_mb=args.mem,
-                    disk_mb=args.disk,
-                ),
+                config,
                 disk_fd=_PLACEHOLDER_FD if args.disk > 0 else None,
             )
     except (OSError, ValueError) as exc:
@@ -174,16 +339,6 @@ def cmd_check(args: argparse.Namespace) -> int:
     else:
         print(_format_results(results))
     return 1 if host_check.has_blocking(results) else 0
-
-
-def _close_fd(fd: int | None) -> None:
-    """Cierra un descriptor; el `finally` exterior lo usa como red de seguridad."""
-    if fd is None:
-        return
-    try:
-        os.close(fd)
-    except OSError:
-        pass
 
 
 def _emit_report(report: str, report_path: str | None) -> None:
@@ -244,43 +399,12 @@ def _boot_source_error(args: argparse.Namespace) -> str | None:
     return None
 
 
-def _closure_label(interrupt: int | None) -> str:
-    """Etiqueta del cierre para el informe."""
-    if interrupt is None:
-        return "normal"
-    if interrupt == signal.SIGINT:
-        return "Ctrl-C"
-    if interrupt == signal.SIGTERM:
-        return "SIGTERM"
-    if interrupt == signal.SIGHUP:
-        return "SIGHUP"
-    return f"señal {interrupt}"
-
-
-def _wipe_disk(
-    args: argparse.Namespace,
-    disk_fd: int | None,
-) -> audit.WipeInfo:
-    """Borra el disco si hay uno; con `--disk 0` solo lo declara, no falla."""
-    if args.disk == 0 or disk_fd is None:
-        return audit.WipeInfo(requested=True, disk_mb=0)
-    try:
-        result = images.wipe_fd(disk_fd)
-    except OSError as exc:
-        print(f"Aviso: no se pudo borrar el disco: {exc}", file=sys.stderr)
-        return audit.WipeInfo(
-            requested=True,
-            disk_mb=args.disk,
-            error=str(exc),
-        )
-    return audit.WipeInfo(
-        requested=True,
-        disk_mb=result.size_mb,
-        seconds=result.seconds,
-    )
-
-
 def cmd_run(args: argparse.Namespace) -> int:
+    profile_error = _apply_profile(args)
+    if profile_error is not None:
+        print(f"Error: {profile_error}", file=sys.stderr)
+        return 2
+
     error = _boot_source_error(args)
     if error is not None:
         print(f"Error: {error}", file=sys.stderr)
@@ -324,8 +448,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(shlex.join(cmd))
         return 0
 
-    # 3. Línea de pre-chequeo con descriptores simulados: P7 y P9 solo miran la
-    # forma de la línea, así que el chequeo no necesita ningún fd real.
+    # 3. Línea de pre-chequeo con descriptores simulados: los chequeos solo
+    # miran su forma, así que no necesitan ningún fd real.
     try:
         precheck_cmd = vm.build_cmd(
             config,
@@ -364,146 +488,56 @@ def cmd_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    disk_fd: int | None = None
-    image_fd: int | None = None
-    # 5. Guard de señales instalado antes de la línea base y de `Popen`, y
-    # vigente durante todo el cierre (wipe, instantánea, informe y sesión).
-    guard = vm.SignalGuard()
-    try:
-        guard.install()
-    except (OSError, ValueError) as exc:
-        print(f"Error: no se pudo instalar el guard de señales: {exc}", file=sys.stderr)
-        return 1
-
+    # 5. La sesión toma la línea base, crea los medios y lanza QEMU. El CLI
+    # conserva su línea serie en stdio; el log solo se declara en el informe.
+    current = session.Session(
+        config,
+        qemu=args.qemu,
+        checks=results,
+        forced=args.force,
+        log_path=None if args.image else args.log,
+    )
     exit_code = 0
-    qemu_interrupt: int | None = None
+    outcome: session.SessionOutcome | None = None
     try:
-        # 6. Línea base limpia: antes de crear el disco y de copiar el ISO.
-        before = audit.take_snapshot()
-        extras = audit.SessionExtras(
-            image_mode=bool(args.image), disk_mb=args.disk
-        )
-        # 7. Medios ya autorizados por el pre-chequeo. El disco disperso (`memfd`
-        # + `ftruncate`) no ocupa RAM hasta que el guest escribe; el ISO sí se
-        # copia entero. La copia consulta al guard antes de cada bloque: una
-        # señal la aborta en vez de copiar gigabytes antes de atenderla.
-        if args.disk > 0:
-            disk_fd = images.create_disk_fd(args.disk)
-        if args.image:
-            try:
-                image_fd = images.create_image_fd(
-                    args.image, should_stop=lambda: guard.interrupt is not None
-                )
-            except InterruptedError as exc:
-                # No hay sesión que arrancar: se sale sin QEMU y sin teardown
-                # de una sesión que no empezó. El `finally` exterior cierra el
-                # disco y restaura el guard.
-                print(f"Interrumpido: {exc}", file=sys.stderr)
-                return 128 + (guard.interrupt or signal.SIGINT)
         try:
-            if guard.interrupt is not None:
-                # La señal llegó con los medios ya creados: no se lanza QEMU,
-                # pero el cierre es el normal (cerrar, borrar e informar).
-                exit_code = 128 + guard.interrupt
-            else:
-                # Línea real, con los descriptores de verdad.
-                cmd = vm.build_cmd(
-                    config, disk_fd, qemu=args.qemu, image_fd=image_fd
-                )
-                if guard.interrupt is not None:
-                    # La señal llegó mientras se construía la línea: QEMU no se
-                    # lanza, pero el cierre es el normal (cerrar, borrar e
-                    # informar) con el código de señal.
-                    exit_code = 128 + guard.interrupt
-                else:
-                    pass_fds = [
-                        fd for fd in (disk_fd, image_fd) if fd is not None
-                    ]
-                    # 8. Sesión bajo el guard del llamador: `run_session` no lo
-                    # restaura.
-                    outcome = vm.run_session(cmd, pass_fds=pass_fds, guard=guard)
-                    exit_code = outcome.returncode
-                    qemu_interrupt = outcome.interrupt
-                    extras = audit.SessionExtras(
-                        closure=_closure_label(outcome.interrupt),
-                        killed_after=outcome.killed_after,
-                        image_mode=bool(args.image),
-                        disk_mb=args.disk,
-                        process_io=outcome.process_io,
-                    )
-        except KeyboardInterrupt:
-            exit_code = 130
-            qemu_interrupt = signal.SIGINT
-            extras = audit.SessionExtras(
-                closure="Ctrl-C",
-                image_mode=bool(args.image),
-                disk_mb=args.disk,
-            )
-            print(
-                "Sesión interrumpida; se emite el informe igualmente.",
-                file=sys.stderr,
-            )
-        finally:
-            # 9. El informe sale pase lo que pase: salida normal, Ctrl-C o
-            # señal. Durante el teardown el guard solo registra la señal; no
-            # aborta el wipe, la instantánea, el informe ni la sesión.
-            # Orden deliberado: cerrar el ISO, borrar el disco si se pidió,
-            # cerrar el disco y solo entonces medir. Si el disco siguiera
-            # abierto, Shmem incluiría lo que el guest escribió y el «después»
-            # nunca volvería a la línea base. El finally exterior queda como
-            # red de seguridad si algo falla antes.
-            _close_fd(image_fd)
-            image_fd = None
-            if args.wipe:
-                extras = replace(extras, wipe=_wipe_disk(args, disk_fd))
-            _close_fd(disk_fd)
-            disk_fd = None
-            try:
-                after = audit.take_snapshot()
-            except (OSError, RuntimeError) as exc:
-                print(
-                    f"Aviso: no se pudo tomar la instantánea final: {exc}",
-                    file=sys.stderr,
-                )
-                after = before
-            if guard.interrupt is not None:
-                # La señal llegó antes de construir el informe: se declara.
-                extras = replace(extras, closure=_closure_label(guard.interrupt))
-            report_text = audit.build_report(
-                before,
-                after,
-                None if args.image else args.log,
-                checks=tuple(results),
-                forced=args.force,
-                extras=extras,
-            )
-            _emit_report(report_text, args.report)
-            try:
-                audit.save_session(
-                    audit.default_session_path(),
-                    before,
-                    after,
-                    checks=tuple(results),
-                    forced=args.force,
-                    extras=extras,
-                )
-            except (OSError, RuntimeError) as exc:
-                print(f"Aviso: no se pudo guardar la sesión: {exc}", file=sys.stderr)
+            current.start()
+        except InterruptedError as exc:
+            # La copia del ISO se abortó antes de lanzar QEMU: no hay sesión
+            # que cerrar ni informe que emitir, igual que en el tramo 5.
+            print(f"Interrumpido: {exc}", file=sys.stderr)
+            current.close()
+            return 128 + (current.interrupt or signal.SIGINT)
+        outcome = current.wait()
+        exit_code = outcome.returncode
+    except KeyboardInterrupt:
+        exit_code = 130
+        print(
+            "Sesión interrumpida; se emite el informe igualmente.",
+            file=sys.stderr,
+        )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        _close_fd(image_fd)
-        _close_fd(disk_fd)
-        # 10. Restauración del guard al final del cierre.
-        guard.restore()
+        if current.before is None:
+            current.close()
+            return 1
+        exit_code = 1
 
-    if qemu_interrupt is None and guard.interrupt is not None:
+    try:
+        report_text = current.finish(wipe=args.wipe)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"Error: no se pudo cerrar la sesión: {exc}", file=sys.stderr)
+        current.close()
+        return 1
+
+    _emit_report(report_text, args.report)
+
+    if (outcome is None or outcome.interrupt is None) and current.interrupt is not None:
         # Señal que no inició el cierre de QEMU (p. ej. durante el wipe).
-        exit_code = 128 + guard.interrupt
+        exit_code = 128 + current.interrupt
     if (
-        extras.wipe is not None
-        and extras.wipe.error is not None
+        current.wipe_info is not None
+        and current.wipe_info.error is not None
         and exit_code == 0
     ):
         # Un wipe pedido y fallido es un cierre incompleto: no puede salir 0.
@@ -542,6 +576,76 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _textual_available() -> bool:
+    """True si el extra `tui` está instalado, sin importar Textual al cargar."""
+    try:
+        return importlib.util.find_spec("textual") is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
+def cmd_tui(args: argparse.Namespace) -> int:
+    """Abre la TUI. Sin TTY o sin el extra, explica qué falta y sale con 2."""
+    no_tty = not sys.stdin.isatty()
+    no_textual = not _textual_available()
+    if no_tty:
+        print(
+            "[vvm] la TUI necesita un terminal interactivo "
+            "(prueba `vvm run --profile NOMBRE`).",
+            file=sys.stderr,
+        )
+    if no_textual:
+        print(
+            "[vvm] falta el extra de la TUI: pip install -e '.[tui]'",
+            file=sys.stderr,
+        )
+    if no_tty or no_textual:
+        return 2
+
+    # Un TOML ausente ya no bloquea la TUI: la pantalla de perfiles se abre
+    # vacía y ofrece crearlo. Sí es un error pedir un perfil concreto cuando
+    # no hay fichero que lo contenga.
+    target = (
+        Path(args.profiles) if args.profiles else profiles.default_profiles_path()
+    )
+    if target.exists():
+        try:
+            loaded = profiles.load_profiles(target)
+        except profiles.ProfilesError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+        if args.profile:
+            try:
+                loaded.get(args.profile)
+            except profiles.ProfilesError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 2
+    elif args.profile:
+        print(
+            f"Error: no existe el fichero de perfiles: {target}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        from vvm.tui.app import VvmApp
+    except ImportError:
+        print(
+            "[vvm] falta el extra de la TUI: pip install -e '.[tui]'",
+            file=sys.stderr,
+        )
+        return 2
+
+    app = VvmApp(
+        profile=args.profile,
+        qemu=args.qemu,
+        profiles_path=args.profiles,
+        refresh_interval=args.refresh,
+    )
+    app.run()
+    return int(getattr(app, "return_code", 0) or 0)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parsea `argv` y despacha el subcomando. Devuelve el código de salida."""
     parser = build_parser()
@@ -552,5 +656,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_run(args)
     if args.command == "audit":
         return cmd_audit(args)
+    if args.command == "profiles":
+        return cmd_profiles(args)
+    if args.command == "tui":
+        return cmd_tui(args)
     parser.print_help()
     return 2

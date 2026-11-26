@@ -1,0 +1,125 @@
+Screen {
+    background: $surface;
+    color: $text;
+}
+
+Header {
+    background: $primary;
+    color: $text;
+}
+
+Footer {
+    background: $panel;
+}
+
+#profiles-title,
+#precheck-title,
+#session-title,
+#report-title {
+    content-align: center middle;
+    text-style: bold;
+    height: 3;
+    padding: 1 2;
+}
+
+#profile-table,
+#check-table {
+    height: 1fr;
+    border: round $primary;
+    margin: 0 1;
+}
+
+#profiles-path,
+#precheck-verdict,
+#session-log,
+#report-path {
+    height: auto;
+    min-height: 1;
+    padding: 0 2;
+    color: $text-muted;
+}
+
+#precheck-verdict {
+    text-style: bold;
+    padding: 1 2;
+}
+
+#session-panel {
+    height: auto;
+    min-height: 12;
+    border: round $primary;
+    padding: 1 2;
+    margin: 0 1;
+}
+
+#report-scroll {
+    height: 1fr;
+    border: round $primary;
+    margin: 0 1;
+}
+
+#report-view {
+    width: 100%;
+    padding: 1 2;
+}
+
+#form-scroll {
+    height: 1fr;
+    border: round $primary;
+    margin: 0 1;
+    padding: 1 2;
+}
+
+#form-scroll Label {
+    margin-top: 1;
+}
+
+#form-scroll Input,
+#form-scroll Select {
+    width: 100%;
+}
+
+#form-buttons {
+    height: auto;
+    margin-top: 2;
+}
+
+#form-buttons Button {
+    margin-right: 2;
+}
+
+#form-error {
+    color: $error;
+    height: auto;
+    min-height: 1;
+    margin-top: 1;
+}
+
+#delete-box {
+    width: 70%;
+    height: auto;
+    border: round $error;
+    padding: 2 3;
+    margin: 4 10;
+}
+
+#delete-title {
+    text-style: bold;
+    height: auto;
+    padding-bottom: 1;
+}
+
+#delete-text,
+#delete-error {
+    height: auto;
+    min-height: 1;
+}
+
+#delete-error {
+    color: $error;
+}
+
+#delete-buttons {
+    height: auto;
+    margin-top: 2;
+}

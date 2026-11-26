@@ -542,3 +542,35 @@ def test_signal_guard_kill_pending_before_attach_is_sent_on_attach():
             proc.kill()
             proc.wait()
         guard.restore()
+
+
+def test_build_cmd_serial_mode_file_in_kernel_mode():
+    config = make_config(serial_mode="file", serial_log="/tmp/serie.log")
+    cmd = build_cmd(config, disk_fd=3)
+
+    assert cmd[cmd.index("-monitor") + 1] == "none"
+    assert cmd[cmd.index("-serial") + 1] == "file:/tmp/serie.log"
+    assert "mon:stdio" not in cmd
+
+
+def test_build_cmd_serial_mode_file_in_image_mode():
+    config = make_config(
+        kernel=None,
+        initrd=None,
+        image="/tmp/live.iso",
+        serial_mode="file",
+        serial_log="/tmp/serie.log",
+    )
+    cmd = build_cmd(config, disk_fd=3, image_fd=9)
+
+    assert cmd[cmd.index("-display") + 1] == "gtk"
+    assert cmd[cmd.index("-monitor") + 1] == "none"
+    assert cmd[cmd.index("-serial") + 1] == "file:/tmp/serie.log"
+    assert "mon:stdio" not in cmd
+
+
+def test_build_cmd_serial_mode_file_requires_log():
+    config = make_config(serial_mode="file")
+
+    with pytest.raises(ValueError, match="serial_mode='file'"):
+        build_cmd(config, disk_fd=3)

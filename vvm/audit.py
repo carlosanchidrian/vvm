@@ -27,15 +27,20 @@ _QEMU_PREFIX = "qemu-system-"
 _MEMFD_PREFIX = "/memfd:"
 _SESSION_MARKER_BYTES = SESSION_MARKER.encode()
 
-# Memfds que crea el escritorio (pantalla, cursor y audio). Se comparan con la
-# línea base y se declaran como pila del anfitrión, nunca como fuga del guest.
-HOST_STACK_MEMFDS = frozenset(
-    {
-        "memfd:displaysurface",
-        "memfd:wayland-cursor",
-        "memfd:pulseaudio",
-    }
+# Memfds que crea el escritorio (pantalla, cursor, audio y PipeWire). Se
+# comparan por prefijo con la línea base y se declaran como pila del anfitrión,
+# nunca como fuga del guest.
+HOST_STACK_MEMFD_PREFIXES = (
+    "memfd:displaysurface",
+    "memfd:wayland-cursor",
+    "memfd:pulseaudio",
+    "memfd:pipewire-",
 )
+
+
+def is_host_stack_memfd(name: str) -> bool:
+    """True si el memfd pertenece a la pila gráfica/audio del anfitrión."""
+    return name.startswith(HOST_STACK_MEMFD_PREFIXES)
 
 
 @dataclass(frozen=True)
@@ -277,8 +282,12 @@ def build_report(
         new_memfds = sorted(set(after.memfds) - set(before.memfds))
     else:
         new_memfds = []
-    host_memfds = [name for name in new_memfds if name in HOST_STACK_MEMFDS]
-    other_memfds = [name for name in new_memfds if name not in HOST_STACK_MEMFDS]
+    host_memfds = [
+        name for name in new_memfds if is_host_stack_memfd(name)
+    ]
+    other_memfds = [
+        name for name in new_memfds if not is_host_stack_memfd(name)
+    ]
     findings: list[str] = []
     findings.extend(f"entrada nueva en /dev/shm: {name}" for name in new_entries)
     findings.extend(
