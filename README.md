@@ -6,8 +6,9 @@ como descriptores de fichero: no hay ruta en disco ni entrada en `/dev/shm`. Al
 cerrar la sesión, la RAM, el disco y el medio del guest desaparecen con ella.
 
 Sin dependencias externas en el CLI: solo biblioteca estándar de Python 3.11+ y
-QEMU/KVM para una sesión real. La TUI es un extra opcional (`textual>=0.80`):
-sin él, `check`, `run`, `audit` y `profiles` funcionan igual.
+QEMU/KVM para una sesión real. La TUI es un extra opcional
+(`textual>=0.80` y `pyte>=0.8`): sin él, `check`, `run`, `audit`, `ps` y
+`profiles` funcionan igual.
 
 ## Requisitos
 
@@ -84,6 +85,24 @@ pasa a serlo el primer perfil alfabético que quede; si el fichero no tenía
 `default`, no se inventa, y un `default` roto se deja como está para que
 `default_warning` lo declare.
 
+### `vvm ps` — sesiones vivas
+
+```bash
+python3 -m vvm ps [--json]
+```
+
+Lee el registro que cada sesión escribe en
+`$XDG_RUNTIME_DIR/vvm/sessions/<id>/live.json` (o el temporal del sistema) y
+lista solo las sesiones cuyo PID sigue vivo **y** es un QEMU VVM. Un PID
+reciclado no se presenta como VM: la entrada se poda de forma best-effort. La
+tabla muestra id, perfil, PID, RAM, disco, estado y tipo de consola; `--json`
+devuelve una lista ordenada por id, con claves ordenadas y sin datos volátiles
+como el uptime. Sin sesiones imprime `no hay sesiones vivas` y sale con 0.
+
+El id tiene la forma `<perfil>-<4 hex>` (el CLI usa `cli`). El runtime de cada
+sesión es un directorio `0700` con su socket serie y su `live.json`; el estado
+guardado va a `$XDG_STATE_HOME/vvm/sessions/<id>.json`.
+
 ### `vvm run` — la sesión
 
 ```bash
@@ -119,8 +138,9 @@ Secuencia:
 7. Al salir —normal, error, Ctrl-C, SIGTERM o SIGHUP— cierra el ISO, borra el
    disco si se pidió `--wipe`, cierra el disco, toma la instantánea final,
    imprime el informe (con el pre-chequeo en la sección 0) y guarda la sesión
-   en `$XDG_STATE_HOME/vvm/last-session.json` (por defecto
-   `~/.local/state/vvm/last-session.json`).
+   en `$XDG_STATE_HOME/vvm/sessions/<id>.json`, además de conservar
+   `$XDG_STATE_HOME/vvm/last-session.json` (por defecto
+   `~/.local/state/vvm/last-session.json`) para `vvm audit` sin argumentos.
 8. Restaura los manejadores de señal.
 
 El orden importa: el ISO se copia entero en RAM, así que la comprobación de memoria mide la que
@@ -161,17 +181,18 @@ Detalles:
   foto del cierre, no una promesa sobre los últimos milisegundos.
 - Para salir de una sesión interactiva: **Ctrl-A x**.
 
-### `vvm tui` — interfaz de terminal
+### `vvm tui` — centro de control multi-VM
 
 ```bash
 pip install -e '.[tui]'
 python3 -m vvm tui [--profile NOMBRE]
 ```
 
-Abre la TUI de Textual. Es un front-end: no construye la línea de QEMU ni abre
-rutas del sistema; usa `session`, `host_check`, `audit` e `images`, los mismos
-módulos que el CLI. Sin terminal interactivo o sin el extra, sale con código 2 y
-explica qué falta; el resto de subcomandos siguen funcionando sin Textual.
+Abre la TUI de Textual. Es un front-end: no abre `/proc` ni lanza procesos;
+usa `session`, `supervisor`, `console`, `host_check`, `audit`, `images` y `vm`
+(solo para construir la línea que inspecciona el pre-chequeo). Sin terminal
+interactivo o sin el extra, sale con código 2 y explica qué falta; el resto de
+subcomandos siguen funcionando sin Textual ni pyte.
 
 Pantallas y teclas:
 
@@ -183,38 +204,71 @@ Pantallas y teclas:
   rechaza sin sobrescribir y el nombre no se cambia al editar.
 - **Pre-chequeo**: P1-P10 con estado, evidencia y remedio; `enter` seguir,
   `f` forzar, `r` repetir y `esc` volver.
-- **Sesión**: estado, PID, tiempo, `write_bytes` destacado, `wchar`/`rchar`/
-  `read_bytes`, Δ`Shmem`, Δ`MemAvailable`, entradas nuevas en `/dev/shm` y
-  memfds atribuidos al guest. Teclas: `s` parar (SIGTERM), `l` log serie,
-  `w` alternar wipe y `q` cerrar emitiendo el informe.
+- **Centro de control**: una pestaña por VM. La cabecera muestra `● id · perfil ·
+  estado · uptime · RAM · PID`; debajo, el panel de I/O y memoria, la consola
+  serie interactiva y el aviso de ventana GTK, wipe y consola. La etiqueta pasa
+  por `●` viva, `◐` cerrando y `○` terminada. Al terminar una VM la pestaña no
+  se cierra: sustituye la consola por su informe.
 - **Informe**: el texto de `build_report()` tal cual, con desplazamiento;
   `g` guardar, `y` copiar y `esc` volver.
 
-En la TUI la consola serie va a un fichero en `$XDG_RUNTIME_DIR/vvm/serie.log`
-(tmpfs), no a stdio: la pantalla es de la TUI. Por eso en modo imagen no se usa
-`Ctrl-A x`; se sale con `s` o `q`, que paran la VM y emiten el informe.
+Consola serie: QEMU escucha en un socket Unix dentro del runtime de la sesión y
+la TUI lo conecta a una pantalla VT100 con pyte. `enter` con el panel enfocado
+activa la captura: las teclas van al guest (incluidas `q`, `s` y `Ctrl-C`) y el
+borde se pone verde. `Ctrl-G` es la única salida: abre el menú de la VM activa.
+
+| Tecla | Dónde | Acción |
+|---|---|---|
+| `Ctrl-G` | siempre | menú de la VM activa (sale de la captura) |
+| `n` | menú / centro | nueva VM |
+| `s` | menú | parar esa VM (SIGTERM) y mostrar su informe |
+| `w` | menú | alternar wipe de esa VM |
+| `r` | menú | ver el informe de la pestaña |
+| `←` / `→` | menú | pestaña anterior / siguiente |
+| `q` | sin captura / menú | cerrar **solo** la VM activa |
+| `c` | menú | enviar `Ctrl-C` al guest |
+| `Ctrl-Q` | siempre | **todas** con wipe, con confirmación, y salir |
+| `enter` | panel | entrar en la consola (captura) |
+
+El cierre total tiene un botón `Cerrar todo + wipe` anclado a la derecha de la
+barra superior. Abre una confirmación que recuerda que se pondrá a cero el disco
+de cada VM: `enter` confirma, `esc` cancela y el foco inicial está en Cancelar.
+Los cierres corren en un hilo para no congelar la pantalla. Si el cierre lo
+inicia SIGTERM, SIGHUP o SIGINT, la app sale con 128+señal. `q` en la última
+pestaña vuelve a la lista de perfiles sin cerrar la aplicación. Si hay VMs
+vivas y `q` se pulsa en perfiles, pre-chequeo o informe, se vuelve al centro de
+control; no se cierra nada sin el modal de cierre total.
+
+La app no se cierra cuando una VM termina. Un único temporizador por app toma
+una instantánea de memoria por tick y la comparte entre todas las pestañas.
 
 ### `vvm audit` — informe de una sesión
 
 ```bash
-python3 -m vvm audit [--session RUTA]
+python3 -m vvm audit [ID] [--session RUTA]
 ```
 
-Sin `--session`, lee la última sesión guardada por `run`. Imprime el informe
-determinista: pre-chequeo de la sesión (sección 0), entradas nuevas en `/dev/shm`,
-memfds nuevos comparados con la línea base —los del escritorio
-(`displaysurface`, `wayland-cursor`, `pulseaudio` y los `pipewire-*`) se
-declaran como pila del anfitrión, no del guest—, procesos QEMU de esa sesión
-vivos al cierre, deltas de
-Shmem/MemAvailable, contadores de I/O de QEMU leídos con la VM viva, cierre y
-resultado de `--wipe`, log serie declarado y las exclusiones de alcance. En una
-sesión con ventana, si `write_bytes` no es cero el informe lo declara como I/O
-del anfitrión con GUI; con `--disk 256` (el valor por defecto) la frase no
-afirma que no haya dispositivo de bloque: dice que la I/O no se puede atribuir
-solo al anfitrión, porque el guest tiene un disco virtio. En modo kernel,
-`write_bytes=0` es el testigo. Si se arrancó con `--force` y había fallos
-bloqueantes, el veredicto lo dice. La ruta del log no se persiste en la sesión,
-así que al reconstruir el informe desde `audit` la sección del log sale vacía.
+Sin argumentos lee la última sesión guardada por `run` (o por la TUI). Con un
+`ID` lee `$XDG_STATE_HOME/vvm/sessions/<id>.json`; si no existe, sale con
+código 2 y lista las sesiones guardadas. `--session RUTA` sigue permitiendo
+apuntar a un fichero concreto.
+
+Imprime el informe determinista: pre-chequeo de la sesión (sección 0), entradas
+nuevas en `/dev/shm`, memfds nuevos comparados con la línea base —los del
+escritorio (`displaysurface`, `wayland-cursor`, `pulseaudio` y los `pipewire-*`)
+se declaran como pila del anfitrión, no del guest—, procesos QEMU de esa sesión
+vivos al cierre, deltas de Shmem/MemAvailable —con la línea «Otras sesiones
+vivas» si había más VMs al arrancar, para no atribuir su actividad al guest—,
+contadores de I/O de QEMU leídos con la VM viva, cierre y resultado de `--wipe`,
+log serie declarado y las exclusiones de alcance. En una sesión con ventana, si
+`write_bytes` no es cero el informe lo declara como I/O del anfitrión con GUI;
+con `--disk 256` (el valor por defecto) la frase no afirma que no haya
+dispositivo de bloque: dice que la I/O no se puede atribuir solo al anfitrión,
+porque el guest tiene un disco virtio. En modo kernel, `write_bytes=0` es el
+testigo. Si se arrancó con `--force` y había fallos bloqueantes, el veredicto lo
+dice. La ruta y el tamaño del log se guardan con la sesión, así que
+`audit <ID>` reproduce la sección del log aunque el fichero se mueva o se
+borre después.
 
 ## Qué garantiza la línea de QEMU
 
@@ -224,9 +278,14 @@ así que al reconstruir el informe desde `audit` la sección del log sale vacía
 - `cache=writethrough`: ni `memfd` ni tmpfs soportan I/O directa.
 - `-nic none`: sin red.
 - `RLIMIT_CORE=0` en el hijo: QEMU no deja core dumps.
-- En modo kernel, `-display none` y serial en `stdio` o en fichero.
+- En modo kernel, `-display none`; la consola serie va a `stdio` (CLI), a un
+  fichero o a un socket Unix (TUI).
 - Con `--image`, `-nodefaults`, `-vga std`, ratón absoluto por USB, el ISO como
   cdrom de solo lectura por fd, `-boot d` y `-display gtk`.
+- Con `serial_mode="socket"` (solo TUI): `-monitor none`, `-chardev
+  socket,id=ser0,path=…,server=on,wait=off` y `-serial chardev:ser0`. No hay
+  QMP ni capturas de pantalla: la pestaña se compone del proceso, la consola y
+  la ventana.
 
 ## Límites honestos
 
@@ -246,7 +305,7 @@ así que al reconstruir el informe desde `audit` la sección del log sale vacía
 ## Desarrollo
 
 ```bash
-python3 -m pytest -q          # suite completa sin KVM (la TUI se salta sin textual)
+python3 -m pytest -q          # suite sin KVM (TUI y consola se saltan sin el extra)
 .venv/bin/python -m pytest -q # suite completa con el extra [tui]
 python3 -m vvm check          # contra el host actual
 python3 -m vvm run --kernel … --initrd … --dry-run
@@ -260,10 +319,12 @@ vvm/
 ├── images.py       # disco memfd + validación de kernel/initrd
 ├── vm.py           # línea de QEMU y ciclo de vida
 ├── session.py      # start/poll/stop/io/finish reutilizable por CLI y TUI
+├── supervisor.py   # ids, runtime, live.json, vvm ps y guardia de grupo
+├── console.py      # socket serie -> pantalla pyte -> teclas (único con pyte)
 ├── profiles.py     # perfiles TOML y validación delegada en vm
 ├── audit.py        # snapshots, informe y sesión en JSON
-├── cli.py          # argparse: check | run | audit | profiles | tui
+├── cli.py          # argparse: check | run | audit | ps | profiles | tui
 ├── tui/            # Textual opcional: app, pantallas, widgets y CSS
 └── __main__.py     # python3 -m vvm
-tests/              # 269 tests, sin KVM
+tests/              # 328 tests, sin KVM
 ```

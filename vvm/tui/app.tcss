@@ -44,7 +44,7 @@ Footer {
     padding: 1 2;
 }
 
-#session-panel {
+.session-panel {
     height: auto;
     min-height: 12;
     border: round $primary;
@@ -122,4 +122,113 @@ Footer {
 #delete-buttons {
     height: auto;
     margin-top: 2;
+}
+
+#topbar {
+    height: 1;
+    background: $primary;
+    color: $text;
+    padding: 0 1;
+}
+
+#topbar-title {
+    width: 1fr;
+    height: 1;
+    content-align: left middle;
+}
+
+#close-all {
+    dock: right;
+    height: 1;
+    min-width: 24;
+}
+
+#empty-state {
+    height: auto;
+    min-height: 3;
+    padding: 1 2;
+    content-align: center middle;
+    color: $text-muted;
+}
+
+#session-tabs {
+    height: 1fr;
+}
+
+SessionTab {
+    height: 1fr;
+}
+
+.session-header {
+    height: auto;
+    min-height: 1;
+    padding: 0 1;
+    text-style: bold;
+}
+
+.session-meta {
+    height: auto;
+    min-height: 1;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+ConsoleView {
+    height: 1fr;
+    min-height: 8;
+    border: round $primary;
+    padding: 0 1;
+}
+
+ConsoleView.capturing {
+    border: round $success;
+}
+
+.console-hint {
+    height: auto;
+    min-height: 1;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#vm-menu {
+    width: 64;
+    height: auto;
+    border: round $primary;
+    padding: 1 2;
+    margin: 4 8;
+}
+
+#vm-menu-title {
+    text-style: bold;
+    height: auto;
+    padding-bottom: 1;
+}
+
+#vm-menu-options {
+    height: auto;
+}
+
+#close-all-box {
+    width: 64;
+    height: auto;
+    border: round $error;
+    padding: 2 3;
+    margin: 4 8;
+}
+
+#close-all-title {
+    text-style: bold;
+    height: auto;
+    padding-bottom: 1;
+}
+
+#close-all-text {
+    height: auto;
+    padding-bottom: 1;
+}
+
+#close-all-buttons {
+    height: auto;
+    margin-top: 1;
 }

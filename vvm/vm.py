@@ -47,8 +47,10 @@ class VmConfig:
     headless: bool = False
     serial_log: str | None = None
     # "stdio" conserva la línea del CLI; "file" manda el monitor y la consola
-    # serie a un fichero para que la TUI pueda usar el terminal.
+    # serie a un fichero; "socket" los manda a un socket Unix para que la TUI
+    # pueda leer y teclear en el guest sin robar el terminal.
     serial_mode: str = "stdio"
+    serial_sock: str | None = None
 
 
 def _validate_config(config: VmConfig) -> None:
@@ -80,15 +82,29 @@ def _validate_config(config: VmConfig) -> None:
                 "Falta la fuente de arranque: usa --image o --kernel/--initrd"
             )
 
-    if config.headless and not config.serial_log:
+    if config.headless and not config.serial_log and config.serial_mode != "socket":
         raise ValueError(
-            "El modo headless necesita un log serie (--log): "
-            "sin fichero de salida la consola del guest se perdería"
+            "El modo headless necesita un log serie (--log) o un socket serie "
+            "en la TUI: sin salida la consola del guest se perdería"
         )
-    if config.serial_mode not in {"stdio", "file"}:
+    if config.serial_mode not in {"stdio", "file", "socket"}:
         raise ValueError(
             f"serial_mode desconocido: {config.serial_mode!r} "
-            "(válidos: 'stdio', 'file')"
+            "(válidos: 'stdio', 'file', 'socket')"
+        )
+    if config.serial_mode == "socket":
+        if not config.serial_sock:
+            raise ValueError(
+                "serial_mode='socket' necesita un socket serie (serial_sock)"
+            )
+        if config.serial_log:
+            raise ValueError(
+                "serial_mode='socket' usa el socket serie: serial_log no puede "
+                "ser una segunda consola"
+            )
+    elif config.serial_sock:
+        raise ValueError(
+            "serial_sock solo vale con serial_mode='socket'"
         )
     if config.serial_mode == "file" and not config.serial_log:
         raise ValueError(
@@ -101,6 +117,30 @@ def _validate_config(config: VmConfig) -> None:
         raise ValueError(f"--disk no puede ser negativo: {config.disk_mb} MB")
     if config.cpus <= 0:
         raise ValueError(f"--cpus debe ser mayor que cero: {config.cpus}")
+
+
+def _serial_args(config: VmConfig) -> list[str]:
+    """Argumentos de consola serie según el modo, sin tocar la línea del CLI."""
+    if config.serial_mode == "socket":
+        return [
+            "-monitor",
+            "none",
+            "-chardev",
+            (
+                f"socket,id=ser0,path={config.serial_sock},"
+                "server=on,wait=off"
+            ),
+            "-serial",
+            "chardev:ser0",
+        ]
+    if config.serial_mode == "file" or config.headless:
+        return [
+            "-monitor",
+            "none",
+            "-serial",
+            f"file:{config.serial_log}",
+        ]
+    return ["-serial", "mon:stdio"]
 
 
 def build_cmd(
@@ -165,15 +205,7 @@ def build_cmd(
             "-display",
             "gtk",
         ]
-        if config.serial_mode == "file":
-            cmd += [
-                "-monitor",
-                "none",
-                "-serial",
-                f"file:{config.serial_log}",
-            ]
-        else:
-            cmd += ["-serial", "mon:stdio"]
+        cmd += _serial_args(config)
         return cmd
 
     cmd += [
@@ -190,10 +222,7 @@ def build_cmd(
             f"file=/dev/fd/{disk_fd},format=raw,if=virtio,cache=writethrough",
         ]
     cmd += ["-nic", "none", "-display", "none"]
-    if config.serial_mode == "file" or config.headless:
-        cmd += ["-monitor", "none", "-serial", f"file:{config.serial_log}"]
-    else:
-        cmd += ["-serial", "mon:stdio"]
+    cmd += _serial_args(config)
     return cmd
 
 

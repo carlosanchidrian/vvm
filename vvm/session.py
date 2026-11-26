@@ -14,12 +14,13 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from vvm import audit, images, vm
+from vvm import audit, images, supervisor, vm
 from vvm.host_check import CheckResult
 
 
@@ -99,6 +100,10 @@ class Session:
         guard: vm.SignalGuard | None = None,
         snapshotter: Callable[[], audit.Snapshot] | None = None,
         session_saver: Callable[..., None] | None = None,
+        session_id: str | None = None,
+        label: str | None = None,
+        install_signals: bool = True,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.config = config
         self.qemu = qemu
@@ -111,6 +116,10 @@ class Session:
         self.guard = guard if guard is not None else vm.SignalGuard()
         self._snapshotter = snapshotter
         self._session_saver = session_saver
+        self.session_id = session_id
+        self.label = label or "cli"
+        self._install_signals = bool(install_signals)
+        self._external_should_stop = should_stop
 
         self.before: audit.Snapshot | None = None
         self.after: audit.Snapshot | None = None
@@ -119,6 +128,7 @@ class Session:
         self.outcome: SessionOutcome | None = None
         self.last_io: IOStats | None = None
         self.started_at: float | None = None
+        self.other_sessions = 0
 
         self._proc: subprocess.Popen | None = None
         self._disk_fd: int | None = None
@@ -126,6 +136,9 @@ class Session:
         self._finished = False
         self._killed_after: float | None = None
         self._stop_signal: int | None = None
+        self._signals_installed = False
+        self._live_written = False
+        self._finish_lock = threading.Lock()
 
     # -- estado -----------------------------------------------------------
 
@@ -189,20 +202,84 @@ class Session:
 
     # -- arranque ---------------------------------------------------------
 
+    def _should_stop(self) -> bool:
+        """Señal del guard propio o la del grupo que gobierna la TUI."""
+        if self._external_should_stop is not None:
+            return self._external_should_stop()
+        return self.guard.interrupt is not None
+
+    def _prepare_registration(self) -> None:
+        """Id, directorio 0700 y socket de esta sesión antes de lanzar QEMU."""
+        if self.session_id is None:
+            self.session_id, directory = supervisor.reserve_session(self.label)
+        else:
+            directory = supervisor.prepare_session_dir(self.session_id)
+        if self.config.serial_mode != "socket":
+            return
+        if not self.config.serial_sock:
+            self.config = replace(
+                self.config, serial_sock=str(directory / "serie.sock")
+            )
+            return
+        socket = Path(self.config.serial_sock)
+        try:
+            if socket.is_socket():
+                socket.unlink()
+        except OSError as exc:
+            print(
+                f"Aviso: no se pudo borrar el socket anterior {socket}: {exc}",
+                file=sys.stderr,
+            )
+
+    def _register_live(self) -> None:
+        """Escribe `live.json` después de `Popen`; un fallo no tumba la VM."""
+        if self._proc is None or self.session_id is None:
+            return
+        serial_path = None
+        if self.config.serial_mode == "socket":
+            serial_path = self.config.serial_sock
+        elif self.config.serial_mode == "file":
+            serial_path = self.config.serial_log
+        entry = supervisor.LiveSession(
+            id=self.session_id,
+            label=self.label,
+            pid=self._proc.pid,
+            mem_mb=self.config.mem_mb,
+            disk_mb=self.config.disk_mb,
+            image=bool(self.config.image),
+            started_at=supervisor.now_utc(),
+            serial=self.config.serial_mode,
+            serial_path=serial_path,
+        )
+        try:
+            supervisor.write_live(entry)
+            self._live_written = True
+        except OSError as exc:
+            print(
+                f"Aviso: no se pudo registrar la sesión viva: {exc}",
+                file=sys.stderr,
+            )
+
     def start(self) -> None:
         """Crea los medios y lanza QEMU. El pre-chequeo ya debe estar hecho."""
         if self._proc is not None or self.before is not None:
             raise RuntimeError("La sesión ya se ha iniciado")
         # Fuera del hilo principal esto lanza ValueError antes de crear nada.
-        self.guard.install()
+        if self._install_signals:
+            self.guard.install()
+            self._signals_installed = True
         self.before = self._snapshot()
         try:
+            self._prepare_registration()
+            self.other_sessions = supervisor.count_others(
+                exclude=self.session_id
+            )
             if self.config.disk_mb > 0:
                 self._disk_fd = images.create_disk_fd(self.config.disk_mb)
             if self.config.image:
                 self._image_fd = images.create_image_fd(
                     self.config.image,
-                    should_stop=lambda: self.guard.interrupt is not None,
+                    should_stop=self._should_stop,
                 )
         except BaseException:
             self._close_media()
@@ -210,7 +287,7 @@ class Session:
 
         # Una señal durante la copia del ISO aborta el arranque sin lanzar
         # QEMU, pero deja el cierre normal para que el llamador informe.
-        if self.guard.interrupt is not None:
+        if self._should_stop():
             self.started_at = time.monotonic()
             return
 
@@ -225,7 +302,7 @@ class Session:
             self._close_media()
             raise
 
-        if self.guard.interrupt is not None:
+        if self._should_stop():
             self.started_at = time.monotonic()
             return
 
@@ -243,6 +320,7 @@ class Session:
             raise
         self.guard.attach(self._proc)
         self.started_at = time.monotonic()
+        self._register_live()
 
     # -- gobierno ---------------------------------------------------------
 
@@ -389,13 +467,52 @@ class Session:
         self._close_fd("_image_fd")
         self._close_fd("_disk_fd")
 
-    def finish(self, *, wipe: bool = False) -> str:
-        """Cierra QEMU y los medios, toma la instantánea final y emite el informe.
+    def _own_snapshots(
+        self,
+    ) -> tuple[audit.Snapshot, audit.Snapshot]:
+        """Quita del informe los procesos y memfds de otras sesiones vivas.
 
-        El orden no cambia: QEMU → ISO → wipe → disco cerrado → instantánea →
-        informe → sesión guardada. Es idempotente y no lanza por una medida
-        final fallida: el informe se emite igualmente.
+        El delta de Shmem sigue siendo global y el informe lo declara con
+        `other_sessions`; la sección 2 y los memfds, en cambio, no pueden
+        atribuir a esta sesión procesos que no son suyos.
         """
+        assert self.before is not None
+        assert self.after is not None
+        own_pid = str(self._proc.pid) if self._proc is not None else None
+        other_pids = (
+            set(self.before.qemu_pids) | set(self.after.qemu_pids)
+        )
+        if own_pid is not None:
+            other_pids.discard(own_pid)
+        excluded_memfds: set[str] = set()
+        for pid in other_pids:
+            if pid.isdigit():
+                excluded_memfds.update(
+                    audit.memfd_names_of(int(pid))
+                )
+
+        def isolate(snapshot: audit.Snapshot) -> audit.Snapshot:
+            pids = (
+                tuple(pid for pid in snapshot.qemu_pids if pid == own_pid)
+                if own_pid is not None
+                else ()
+            )
+            memfds = snapshot.memfds
+            if memfds is not None and excluded_memfds:
+                memfds = tuple(
+                    name for name in memfds if name not in excluded_memfds
+                )
+            return replace(snapshot, qemu_pids=pids, memfds=memfds)
+
+        return isolate(self.before), isolate(self.after)
+
+    def finish(self, *, wipe: bool = False) -> str:
+        """Cierra la sesión una sola vez aunque dos hilos la pidan a la vez."""
+        with self._finish_lock:
+            return self._finish_locked(wipe)
+
+    def _finish_locked(self, wipe: bool) -> str:
+        """Cuerpo de `finish()`, protegido por `_finish_lock`."""
         if self._finished:
             if self.report is None:
                 raise RuntimeError("La sesión se cerró sin informe")
@@ -421,11 +538,18 @@ class Session:
             )
             self.after = self.before
 
+        self.before, self.after = self._own_snapshots()
         interrupt = self.interrupt
         closure = _closure_label(interrupt)
         killed_after = self._killed_after
         if killed_after is None and self.outcome is not None:
             killed_after = self.outcome.killed_after
+        log_size: int | None = None
+        if self.log_path:
+            try:
+                log_size = Path(self.log_path).stat().st_size
+            except OSError:
+                log_size = None
         extras = audit.SessionExtras(
             closure=closure,
             killed_after=killed_after,
@@ -433,6 +557,9 @@ class Session:
             image_mode=bool(self.config.image),
             disk_mb=self.config.disk_mb,
             process_io=self.last_io,
+            log_path=self.log_path or None,
+            log_size=log_size,
+            other_sessions=self.other_sessions,
         )
         self.report = audit.build_report(
             self.before,
@@ -442,32 +569,47 @@ class Session:
             forced=self.forced,
             extras=extras,
         )
-        path = self.session_path or audit.default_session_path()
+        paths: list[Path] = [
+            self.session_path or audit.default_session_path()
+        ]
+        if self.session_id:
+            try:
+                per_id = audit.session_path_for(self.session_id)
+            except ValueError:
+                per_id = None
+            if per_id is not None and per_id not in paths:
+                paths.append(per_id)
         saver = self._session_saver
-        try:
-            if saver is None:
-                audit.save_session(
-                    path,
-                    self.before,
-                    self.after,
-                    checks=self.checks,
-                    forced=self.forced,
-                    extras=extras,
-                )
-            else:
-                saver(
-                    path,
-                    self.before,
-                    self.after,
-                    checks=self.checks,
-                    forced=self.forced,
-                    extras=extras,
-                )
-        except (OSError, RuntimeError, ValueError) as exc:
-            print(f"Aviso: no se pudo guardar la sesión: {exc}", file=sys.stderr)
+        for path in paths:
+            try:
+                if saver is None:
+                    audit.save_session(
+                        path,
+                        self.before,
+                        self.after,
+                        checks=self.checks,
+                        forced=self.forced,
+                        extras=extras,
+                    )
+                else:
+                    saver(
+                        path,
+                        self.before,
+                        self.after,
+                        checks=self.checks,
+                        forced=self.forced,
+                        extras=extras,
+                    )
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(f"Aviso: no se pudo guardar la sesión: {exc}", file=sys.stderr)
 
+        if self.session_id is not None:
+            supervisor.remove_live(self.session_id)
+            self._live_written = False
         self._finished = True
-        self.guard.restore()
+        if self._signals_installed:
+            self.guard.restore()
+            self._signals_installed = False
         return self.report
 
     def close(self) -> None:
@@ -478,4 +620,9 @@ class Session:
             except (OSError, RuntimeError):
                 pass
         self._close_media()
-        self.guard.restore()
+        if self.session_id is not None:
+            supervisor.remove_live(self.session_id)
+            self._live_written = False
+        if self._signals_installed:
+            self.guard.restore()
+            self._signals_installed = False

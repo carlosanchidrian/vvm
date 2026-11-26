@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
-
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
+from textual.css.query import NoMatches
+from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
     Checkbox,
@@ -18,13 +18,21 @@ from textual.widgets import (
     Label,
     Select,
     Static,
+    TabbedContent,
+    TabPane,
 )
 
-from vvm import audit, host_check, images, profiles, vm
+from vvm import audit, profiles, vm
 from vvm.host_check import CheckResult
 from vvm.session import Session
 
-from .widgets import CheckTable, ReportView, SessionPanel
+from .widgets import (
+    CheckTable,
+    ReportView,
+    SessionPanel,
+    SessionRuntime,
+    SessionTab,
+)
 
 
 def _blocking(results: Sequence[CheckResult]) -> list[CheckResult]:
@@ -49,6 +57,7 @@ class ProfilesScreen(Screen):
         ("e", "edit", "Editar"),
         ("d", "delete", "Eliminar"),
         ("a", "last_report", "Último informe"),
+        ("escape", "quit", "Volver/Salir"),
         ("q", "quit", "Salir"),
     ]
 
@@ -151,7 +160,7 @@ class ProfilesScreen(Screen):
         self.app.confirm_delete(profile)
 
     def action_quit(self) -> None:
-        self.app.exit(0)
+        self.app.quit_or_return()
 
 
 class ProfileFormScreen(Screen):
@@ -517,131 +526,295 @@ class PreCheckScreen(Screen):
         self.app.pop_screen()
 
     def action_quit(self) -> None:
-        self.app.exit(0)
+        self.app.quit_or_return()
 
 
-class SessionScreen(Screen):
-    """Sesión en vivo con el panel de I/O y memoria."""
+class MainScreen(Screen):
+    """Centro de control multi-VM: barra superior, pestañas y cierre total."""
 
     BINDINGS = [
-        ("s", "stop", "Parar"),
-        ("l", "log", "Log serie"),
-        ("w", "toggle_wipe", "Wipe"),
-        ("q", "close", "Cerrar e informar"),
+        ("q", "close_active", "Cerrar VM"),
+        ("n", "new_vm", "Nueva VM"),
     ]
 
-    def __init__(
-        self,
-        session: Session,
-        warnings: Sequence[CheckResult],
-        *,
-        profile: profiles.Profile | None = None,
-        refresh_interval: float | None = None,
-    ) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.session = session
-        self.warnings = tuple(warnings)
-        self.refresh_interval = refresh_interval
-        self.wipe = bool(profile.wipe) if profile is not None else False
-        self._finished = False
-        self._timer = None
+        self.tabs_by_id: dict[str, SessionTab] = {}
+        self.pane_order: list[str] = []
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield Static("Sesión en vivo", id="session-title")
-        yield SessionPanel()
-        yield Static("", id="session-log")
+        with Horizontal(id="topbar"):
+            yield Static("VVM · 0 VMs", id="topbar-title")
+            yield Button(
+                "Cerrar todo + wipe", id="close-all", variant="error"
+            )
+        yield Static("sin VMs · n abre perfiles", id="empty-state")
+        yield TabbedContent(id="session-tabs")
         yield Footer()
 
     def on_mount(self) -> None:
-        interval = (
-            self.refresh_interval
-            if self.refresh_interval is not None
-            else self.app.refresh_interval
-        )
-        self._timer = self.set_interval(max(0.05, interval), self.refresh_panel)
-        self.refresh_panel()
+        self._update_empty()
 
-    def _snapshot(self) -> audit.Snapshot | None:
+    @property
+    def is_ready(self) -> bool:
+        """True cuando la barra superior y las pestañas ya están compuestas."""
         try:
-            return audit.take_snapshot()
-        except (OSError, RuntimeError):
+            self.query_one("#topbar-title", Static)
+            self.query_one(TabbedContent)
+        except NoMatches:
+            return False
+        return True
+
+    # -- pestañas ---------------------------------------------------------
+
+    def _pane_id(self, runtime_id: str) -> str:
+        return f"pane-{runtime_id}"
+
+    async def add_session(self, runtime: SessionRuntime) -> None:
+        tabs = self.query_one(TabbedContent)
+        pane = TabPane(
+            f"● {runtime.label}",
+            SessionTab(runtime),
+            id=self._pane_id(runtime.id),
+        )
+        await tabs.add_pane(pane)
+        tab = pane.query_one(SessionTab)
+        self.tabs_by_id[runtime.id] = tab
+        self.pane_order.append(runtime.id)
+        tabs.active = self._pane_id(runtime.id)
+        self._focus_tab(runtime.id)
+        self.call_after_refresh(self._focus_tab, runtime.id)
+        self._update_empty()
+
+    async def remove_session(self, runtime_id: str) -> None:
+        pane_id = self._pane_id(runtime_id)
+        self.tabs_by_id.pop(runtime_id, None)
+        if runtime_id in self.pane_order:
+            self.pane_order.remove(runtime_id)
+        if pane_id in [pane.id for pane in self.query(TabPane)]:
+            await self.query_one(TabbedContent).remove_pane(pane_id)
+        if self.pane_order:
+            active = self.active_runtime_id() or self.pane_order[0]
+            self._focus_tab(active)
+        self._update_empty()
+
+    def tab_for(self, runtime_id: str) -> SessionTab | None:
+        return self.tabs_by_id.get(runtime_id)
+
+    def active_runtime_id(self) -> str | None:
+        tabs = self.query_one(TabbedContent)
+        active = tabs.active
+        if not active:
             return None
+        runtime_id = active.removeprefix("pane-")
+        return runtime_id if runtime_id in self.tabs_by_id else None
 
-    def refresh_panel(self) -> None:
-        if self._finished:
-            return
-        panel = self.query_one(SessionPanel)
-        if self.session.running:
-            panel.state = "viva"
-            panel.show(
-                self.session,
-                self._snapshot(),
-                self.warnings,
-                wipe=self.wipe,
-            )
-            self.query_one("#session-log", Static).update(
-                f"Log serie: {self.session.log_path or 'ninguno'}"
-            )
-            return
-
-        panel.state = "terminada"
-        panel.show(
-            self.session,
-            self._snapshot(),
-            self.warnings,
-            wipe=self.wipe,
+    def switch_tab(self, offset: int) -> str | None:
+        if not self.pane_order:
+            return None
+        current = self.active_runtime_id()
+        index = (
+            self.pane_order.index(current)
+            if current in self.pane_order
+            else 0
         )
-        self._finish_and_report(auto_exit=True)
+        index = (index + offset) % len(self.pane_order)
+        runtime_id = self.pane_order[index]
+        self.query_one(TabbedContent).active = self._pane_id(runtime_id)
+        self._focus_tab(runtime_id)
+        self.call_after_refresh(self._focus_tab, runtime_id)
+        return runtime_id
 
-    def _finish_and_report(self, *, auto_exit: bool) -> None:
-        if self._finished:
-            return
-        self._finished = True
-        panel = self.query_one(SessionPanel)
-        panel.update_state("cerrando")
-        report = self.session.finish(wipe=self.wipe)
-        self.app.last_report = report
-        self.app.push_screen(ReportScreen(report, session=self.session))
-        if auto_exit and self.app.auto_exit_on_finish:
-            self.app.set_timer(self.app.exit_delay, lambda: self.app.exit(0))
-
-    def action_stop(self) -> None:
-        if not self._finished:
-            self.query_one(SessionPanel).update_state("cerrando")
-            self.session.stop()
-        self._finish_and_report(auto_exit=False)
-        self.app.exit(0)
-
-    def action_close(self) -> None:
-        if not self._finished:
-            if self.session.running:
-                self.session.stop()
-            self._finish_and_report(auto_exit=False)
-
-    def action_toggle_wipe(self) -> None:
-        self.wipe = not self.wipe
-        self.refresh_panel()
-
-    def action_log(self) -> None:
-        path = self.session.log_path
-        if not path:
-            self.app.notify("Esta sesión no tiene log serie")
-            return
-        if not Path(path).exists():
-            self.app.notify(f"El log todavía no existe: {path}")
-            return
-        self.app.notify(f"Log serie: {path}")
-
-    def on_unmount(self) -> None:
-        if self._finished:
+    def _focus_tab(self, runtime_id: str) -> None:
+        """El foco debe caer en la pestaña visible, no en una oculta."""
+        tab = self.tabs_by_id.get(runtime_id)
+        if tab is None or not tab.is_mounted:
             return
         try:
-            if self.session.running:
-                self.session.stop()
-            self.session.finish(wipe=self.wipe)
-        except (OSError, RuntimeError, ValueError):
-            self.session.close()
+            tab.query_one(SessionPanel).focus()
+        except NoMatches:
+            self.call_after_refresh(self._focus_tab, runtime_id)
+
+    def _focus_active(self) -> None:
+        runtime_id = self.active_runtime_id()
+        if runtime_id is not None:
+            self._focus_tab(runtime_id)
+
+    def on_tabbed_content_tab_activated(
+        self, event: TabbedContent.TabActivated
+    ) -> None:
+        """Al activar una pestaña, el foco va a su panel aunque llegue tarde."""
+        self.call_after_refresh(self._focus_active)
+
+    def update_tab_label(self, runtime_id: str) -> None:
+        tab = self.tabs_by_id.get(runtime_id)
+        if tab is None:
+            return
+        try:
+            content_tab = self.query_one(TabbedContent).get_tab(
+                self._pane_id(runtime_id)
+            )
+        except (ValueError, NoMatches):
+            return
+        content_tab.label = f"{tab.symbol} {tab.runtime.label}"
+
+    def refresh_all(self, snapshot: audit.Snapshot | None) -> None:
+        if not self.is_ready:
+            return
+        for runtime_id, tab in list(self.tabs_by_id.items()):
+            tab.refresh_view(snapshot)
+            self.update_tab_label(runtime_id)
+        self._update_title()
+
+    def _update_title(self) -> None:
+        try:
+            self.query_one("#topbar-title", Static).update(
+                f"VVM · {len(self.pane_order)} VM(s)"
+            )
+        except NoMatches:
+            return
+
+    def _update_empty(self) -> None:
+        empty = len(self.pane_order) == 0
+        try:
+            self.query_one("#empty-state", Static).display = empty
+            self.query_one("#session-tabs", TabbedContent).display = not empty
+        except NoMatches:
+            return
+        self._update_title()
+
+    # -- acciones ---------------------------------------------------------
+
+    def action_close_active(self) -> None:
+        runtime_id = self.active_runtime_id()
+        if runtime_id is None:
+            return
+        self.app.close_session(runtime_id)
+
+    def action_new_vm(self) -> None:
+        self.app.open_new_vm()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "close-all":
+            self.app.confirm_close_all()
+
+
+class VmMenuScreen(ModalScreen[None]):
+    """Menú de la VM activa; es la única salida de la captura de teclado."""
+
+    BINDINGS = [
+        ("n", "new_vm", "Nueva VM"),
+        ("s", "stop_vm", "Parar"),
+        ("w", "wipe", "Wipe"),
+        ("r", "report", "Informe"),
+        ("left", "prev_tab", "Anterior"),
+        ("right", "next_tab", "Siguiente"),
+        ("q", "close_vm", "Cerrar VM"),
+        ("c", "ctrl_c", "Ctrl-C al guest"),
+        ("escape", "dismiss_menu", "Volver"),
+    ]
+
+    def __init__(self, runtime: SessionRuntime) -> None:
+        super().__init__()
+        self.runtime = runtime
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="vm-menu"):
+            yield Static(
+                f"VM {self.runtime.id} · {self.runtime.label}", id="vm-menu-title"
+            )
+            yield Static(
+                "n nueva VM   s parar   w wipe   r informe\n"
+                "←/→ cambiar pestaña   q cerrar esta VM   c Ctrl-C\n"
+                "esc volver",
+                id="vm-menu-options",
+            )
+        yield Footer()
+
+    def action_dismiss_menu(self) -> None:
+        self.dismiss(None)
+
+    def action_new_vm(self) -> None:
+        self.dismiss(None)
+        self.app.open_new_vm()
+
+    def action_stop_vm(self) -> None:
+        self.dismiss(None)
+        self.app.stop_session(self.runtime.id)
+
+    def action_wipe(self) -> None:
+        enabled = self.app.toggle_wipe(self.runtime.id)
+        self.query_one("#vm-menu-title", Static).update(
+            f"VM {self.runtime.id} · {self.runtime.label} · "
+            f"wipe {'sí' if enabled else 'no'}"
+        )
+
+    def action_report(self) -> None:
+        self.dismiss(None)
+        self.app.show_report(self.runtime.id)
+
+    def action_prev_tab(self) -> None:
+        self.dismiss(None)
+        self.app.switch_tab(-1)
+
+    def action_next_tab(self) -> None:
+        self.dismiss(None)
+        self.app.switch_tab(1)
+
+    def action_close_vm(self) -> None:
+        self.dismiss(None)
+        self.app.close_session(self.runtime.id)
+
+    def action_ctrl_c(self) -> None:
+        self.dismiss(None)
+        self.app.send_ctrl_c(self.runtime.id)
+
+
+class CloseAllScreen(ModalScreen[bool]):
+    """Confirmación de una tecla para cerrar todas las VM con wipe."""
+
+    BINDINGS = [
+        Binding("enter", "confirm", "Confirmar", priority=True),
+        ("escape", "cancel", "Cancelar"),
+    ]
+
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self.count = count
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="close-all-box"):
+            yield Static(
+                f"¿Cerrar {self.count} VM(s)?", id="close-all-title"
+            )
+            yield Static(
+                "Se pondrá a cero el disco de cada una. "
+                "Enter confirma; Esc cancela.",
+                id="close-all-text",
+            )
+            with Horizontal(id="close-all-buttons"):
+                yield Button("Cancelar", id="cancel-all")
+                yield Button(
+                    "Cerrar todo + wipe",
+                    id="confirm-all",
+                    variant="error",
+                )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel-all", Button).focus()
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "confirm-all":
+            self.dismiss(True)
+        elif event.button.id == "cancel-all":
+            self.dismiss(False)
 
 
 class ReportScreen(Screen):
@@ -690,4 +863,4 @@ class ReportScreen(Screen):
         self.app.show_profiles()
 
     def action_quit(self) -> None:
-        self.app.exit(0)
+        self.app.quit_or_return()

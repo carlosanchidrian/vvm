@@ -13,18 +13,25 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("textual")
+pytest.importorskip("pyte")
 
+from textual.widgets import Input, Select  # noqa: E402
+
+import vvm.tui.app as tui_app  # noqa: E402
 from vvm import cli, host_check, profiles, vm  # noqa: E402
+from vvm.console import ConsoleSnapshot, Span  # noqa: E402
 from vvm.tui.app import VvmApp  # noqa: E402
 from vvm.tui.screens import (  # noqa: E402
+    CloseAllScreen,
     DeleteProfileScreen,
+    MainScreen,
     PreCheckScreen,
     ProfileFormScreen,
     ProfilesScreen,
     ReportScreen,
-    SessionScreen,
+    VmMenuScreen,
 )
-from textual.widgets import Input, Select  # noqa: E402
+from vvm.tui.widgets import ConsoleView, SessionPanel  # noqa: E402
 
 SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +49,33 @@ def host_ok(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(host_check, "read_ksm_run", lambda: "0\n")
     monkeypatch.setattr(host_check, "read_shmem_enabled", lambda: "[never] always\n")
     monkeypatch.setattr(host_check, "list_shm_entries", lambda: [])
+
+
+class _FakeConsole:
+    """Consola sin socket para que los tests de TUI no abran hilos."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.sent: list[bytes] = []
+        self.bytes_received = 1
+        self.stopped = False
+
+    def send(self, data: bytes) -> bool:
+        self.sent.append(data)
+        return True
+
+    def snapshot(self) -> ConsoleSnapshot:
+        return ConsoleSnapshot(
+            rows=((Span("~ # _"),),), cursor=(5, 0)
+        )
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.fixture(autouse=True)
+def fake_console(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(tui_app, "SerialConsole", _FakeConsole)
 
 
 def _boot(tmp_path: Path) -> tuple[Path, Path]:
@@ -70,6 +104,30 @@ disk_mb = 8
     return path
 
 
+def _two_profiles_file(tmp_path: Path) -> Path:
+    kernel, initrd = _boot(tmp_path)
+    path = tmp_path / "profiles.toml"
+    path.write_text(
+        f"""
+default = "uno"
+
+[profiles.uno]
+kernel = "{kernel}"
+initrd = "{initrd}"
+mem_mb = 256
+disk_mb = 8
+
+[profiles.dos]
+kernel = "{kernel}"
+initrd = "{initrd}"
+mem_mb = 256
+disk_mb = 8
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _fake_qemu(tmp_path: Path, body: str) -> Path:
     script = tmp_path / "fake-qemu"
     script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
@@ -77,9 +135,19 @@ def _fake_qemu(tmp_path: Path, body: str) -> Path:
     return script
 
 
+def _looping_qemu(tmp_path: Path, marker: Path) -> Path:
+    return _fake_qemu(
+        tmp_path,
+        (
+            f"echo $$ >> {marker}\n"
+            "trap 'exit 0' TERM\n"
+            "i=0; while [ $i -lt 1000 ]; do sleep 0.05; i=$((i+1)); done\n"
+        ),
+    )
+
+
 def _app(tmp_path: Path, qemu: str = "/bin/true", **kwargs) -> VvmApp:
-    kwargs.setdefault("auto_exit_on_finish", False)
-    kwargs.setdefault("refresh_interval", 0.05)
+    kwargs.setdefault("refresh_interval", 0.1)
     return VvmApp(
         profiles_path=_profiles_file(tmp_path),
         qemu=qemu,
@@ -95,15 +163,122 @@ def _wait_for(path: Path, timeout: float = 5.0) -> None:
         time.sleep(0.02)
 
 
-def _kill_marked_child(marker: Path) -> None:
+def _wait_lines(path: Path, count: int, timeout: float = 5.0) -> list[int]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            lines = [
+                int(line)
+                for line in path.read_text(encoding="utf-8").split()
+                if line.strip()
+            ]
+        except (OSError, ValueError):
+            lines = []
+        if len(lines) >= count:
+            return lines
+        time.sleep(0.02)
+    raise AssertionError(f"no aparecieron {count} pids en {path}")
+
+
+def _kill_marked_children(marker: Path) -> None:
     try:
-        child = int(marker.read_text(encoding="utf-8").strip())
+        pids = [
+            int(line)
+            for line in marker.read_text(encoding="utf-8").split()
+            if line.strip()
+        ]
     except (OSError, ValueError):
         return
+    for child in pids:
+        try:
+            os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _alive(pid: int) -> bool:
     try:
-        os.kill(child, signal.SIGKILL)
+        os.kill(pid, 0)
     except ProcessLookupError:
-        pass
+        return False
+    return True
+
+
+async def _wait_sessions(pilot, app: VvmApp, count: int, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        ready = len(app.sessions) >= count
+        if ready and app.main_screen is not None:
+            ready = all(
+                (tab := app.main_screen.tab_for(runtime_id)) is not None
+                and tab.is_mounted
+                and bool(tab.query(SessionPanel))
+                for runtime_id in app.sessions
+            )
+        if ready:
+            return
+        if time.monotonic() > deadline:
+            raise AssertionError(
+                f"sesiones esperadas {count}, hay {len(app.sessions)}"
+            )
+        await pilot.pause(0.05)
+
+
+async def _wait_finished(pilot, app: VvmApp, runtime_id: str, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        runtime = app.sessions.get(runtime_id)
+        if runtime is not None and runtime.report is not None:
+            break
+        if time.monotonic() > deadline:
+            raise AssertionError(f"la VM {runtime_id} no terminó")
+        await pilot.pause(0.05)
+
+
+async def _wait_tab(pilot, app: VvmApp, runtime_id: str, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        tab = app.main_screen.tab_for(runtime_id) if app.main_screen else None
+        if tab is not None and tab.is_mounted:
+            return tab
+        if time.monotonic() > deadline:
+            raise AssertionError(f"no apareció la pestaña de {runtime_id}")
+        await pilot.pause(0.05)
+
+
+async def _quit_profiles(pilot, app: VvmApp) -> None:
+    if isinstance(app.screen, ProfilesScreen) and app.return_code is None:
+        await pilot.press("q")
+        await pilot.pause(0.3)
+
+
+async def _close_active_and_wait(pilot, app: VvmApp, timeout: float = 8.0) -> None:
+    """Cierra la VM activa desde el menú y deja tiempo al cierre."""
+    await pilot.press("ctrl+g")
+    await pilot.pause()
+    await pilot.press("q")
+    await pilot.pause(1.0)
+
+
+async def _start_first(pilot) -> None:
+    await pilot.press("enter")
+    await pilot.pause()
+    assert isinstance(pilot.app.screen, PreCheckScreen)
+    await pilot.press("enter")
+    await pilot.pause(0.3)
+
+
+async def _start_second(pilot) -> None:
+    await pilot.press("n")
+    await pilot.pause()
+    assert isinstance(pilot.app.screen, ProfilesScreen)
+    await pilot.press("up")
+    await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+    assert isinstance(pilot.app.screen, PreCheckScreen)
+    await pilot.press("enter")
+    await pilot.pause(0.3)
 
 
 def test_carga_perfiles_entra_al_prechequeo_y_sale_con_q(
@@ -128,7 +303,7 @@ def test_carga_perfiles_entra_al_prechequeo_y_sale_con_q(
     assert app.return_code == 0
 
 
-def test_la_linea_de_la_tui_lleva_la_serie_a_fichero(
+def test_la_linea_de_la_tui_lleva_la_serie_a_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
@@ -143,18 +318,23 @@ def test_la_linea_de_la_tui_lleva_la_serie_a_fichero(
         qemu=app.qemu,
     )
 
-    assert config.serial_mode == "file"
-    assert config.serial_log == str(tmp_path / "runtime" / "vvm" / "serie.log")
+    assert config.serial_mode == "socket"
+    assert config.serial_sock == "<socket>"
+    assert config.serial_log is None
     assert cmd[cmd.index("-monitor") + 1] == "none"
-    assert cmd[cmd.index("-serial") + 1].startswith("file:")
+    assert cmd[cmd.index("-serial") + 1] == "chardev:ser0"
+    chardev = cmd[cmd.index("-chardev") + 1]
+    assert chardev.startswith("socket,id=ser0,path=<socket>")
+    assert chardev.endswith("server=on,wait=off")
     assert "mon:stdio" not in cmd
+    assert "-qmp" not in cmd
     by_id = {result.id: result for result in results}
     assert by_id["P2"].status == "OK"
     assert by_id["P7"].status == "OK"
     assert by_id["P9"].status == "OK"
 
 
-def test_qemu_true_termina_y_muestra_el_informe(
+def test_qemu_true_termina_y_muestra_el_informe_sin_cerrar_la_app(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
@@ -163,50 +343,188 @@ def test_qemu_true_termina_y_muestra_el_informe(
     async def run() -> None:
         async with app.run_test(size=(100, 35)) as pilot:
             await pilot.pause()
-            await pilot.press("enter")
-            await pilot.pause()
-            await pilot.press("enter")
-            await pilot.pause(0.4)
-            assert isinstance(app.screen, ReportScreen)
-            assert app.last_report is not None
-            assert "Informe de sesión VVM" in app.last_report
+            await _start_first(pilot)
+            await _wait_sessions(pilot, app, 1)
+            runtime_id = next(iter(app.sessions))
+            await _wait_finished(pilot, app, runtime_id)
+            assert isinstance(app.screen, MainScreen)
+            assert app.return_code is None
+            runtime = app.sessions[runtime_id]
+            assert runtime.report is not None
+            assert "Informe de sesión VVM" in runtime.report
+            tab = app.main_screen.tab_for(runtime_id)
+            assert tab is not None
+            assert tab.symbol == "○"
             assert "Informe de sesión VVM" in app.export_text()
+            await _close_active_and_wait(pilot, app)
+            assert isinstance(app.screen, ProfilesScreen)
             await pilot.press("q")
+            await pilot.pause(0.2)
 
     asyncio.run(run())
     assert app.return_code == 0
 
 
-def test_la_app_se_cierra_sola_al_terminar_el_hijo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
-):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
-    app = _app(tmp_path, auto_exit_on_finish=True, exit_delay=0.1)
-
-    async def run() -> None:
-        async with app.run_test(size=(100, 35)) as pilot:
-            await pilot.pause()
-            await pilot.press("enter")
-            await pilot.pause()
-            await pilot.press("enter")
-            await pilot.pause(0.5)
-
-    asyncio.run(run())
-    assert app.return_code == 0
-
-
-def test_s_para_el_fake_y_sale_sin_hijos(
+def test_s_para_el_fake_y_deja_el_informe_en_la_pestana(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     marker = tmp_path / "qemu.pid"
-    qemu = _fake_qemu(
-        tmp_path,
-        (
-            f"echo $$ > {marker}\n"
-            "trap 'exit 0' TERM\n"
-            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
-        ),
+    qemu = _looping_qemu(tmp_path, marker)
+    app = _app(tmp_path, qemu=str(qemu))
+    try:
+
+        async def run() -> None:
+            async with app.run_test(size=(100, 35)) as pilot:
+                await pilot.pause()
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                pids = _wait_lines(marker, 1)
+                runtime_id = next(iter(app.sessions))
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                assert isinstance(app.screen, VmMenuScreen)
+                await pilot.press("s")
+                await _wait_finished(pilot, app, runtime_id)
+                assert isinstance(app.screen, MainScreen)
+                assert app.sessions[runtime_id].report is not None
+                assert app.main_screen.tab_for(runtime_id).symbol == "○"
+                assert not _alive(pids[0])
+                await _close_active_and_wait(pilot, app)
+                await _quit_profiles(pilot, app)
+
+        asyncio.run(run())
+    finally:
+        _kill_marked_children(marker)
+
+
+def test_dos_vms_pestanas_y_cierre_granular(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    marker = tmp_path / "qemu.pid"
+    qemu = _looping_qemu(tmp_path, marker)
+    app = VvmApp(
+        profiles_path=_two_profiles_file(tmp_path),
+        qemu=str(qemu),
+        refresh_interval=0.2,
+    )
+    try:
+
+        async def run() -> None:
+            async with app.run_test(size=(110, 40)) as pilot:
+                await pilot.pause()
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                await _start_second(pilot)
+                await _wait_sessions(pilot, app, 2)
+                assert isinstance(app.screen, MainScreen)
+
+                first_id, second_id = app.main_screen.pane_order
+                assert first_id != second_id
+                pids = _wait_lines(marker, 2)
+                first_session = app.sessions[first_id].session
+                second_session = app.sessions[second_id].session
+                assert first_session.running and second_session.running
+                for runtime_id in (first_id, second_id):
+                    tab = app.main_screen.tab_for(runtime_id)
+                    assert tab is not None and tab.symbol == "●"
+
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                await pilot.press("q")
+                await pilot.pause(0.6)
+
+                assert isinstance(app.screen, MainScreen)
+                assert app.main_screen.active_runtime_id() == first_id
+                assert list(app.sessions) == [first_id]
+                assert first_session.running
+                assert second_session.poll() is not None
+                assert not _alive(pids[1])
+
+                await _close_active_and_wait(pilot, app)
+                assert isinstance(app.screen, ProfilesScreen)
+                assert not app.sessions
+                assert not _alive(pids[0])
+                await _quit_profiles(pilot, app)
+
+        asyncio.run(run())
+    finally:
+        _kill_marked_children(marker)
+
+
+def test_q_sin_captura_cierra_solo_la_vm_activa(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    marker = tmp_path / "qemu.pid"
+    qemu = _looping_qemu(tmp_path, marker)
+    app = VvmApp(
+        profiles_path=_two_profiles_file(tmp_path),
+        qemu=str(qemu),
+        refresh_interval=0.2,
+    )
+    try:
+
+        async def run() -> None:
+            async with app.run_test(size=(110, 40)) as pilot:
+                await pilot.pause()
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                await _start_second(pilot)
+                await _wait_sessions(pilot, app, 2)
+                first_id, second_id = app.main_screen.pane_order
+                first_session = app.sessions[first_id].session
+                second_session = app.sessions[second_id].session
+
+                await pilot.press("q")
+                await pilot.pause(0.6)
+
+                assert isinstance(app.screen, MainScreen)
+                assert list(app.sessions) == [first_id]
+                assert first_session.running
+                assert second_session.poll() is not None
+
+                await _close_active_and_wait(pilot, app)
+                assert isinstance(app.screen, ProfilesScreen)
+                await _quit_profiles(pilot, app)
+
+        asyncio.run(run())
+    finally:
+        _kill_marked_children(marker)
+
+
+def test_captura_envia_teclas_al_guest_y_ctrl_q_sigue_disponible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    marker = tmp_path / "qemu.pid"
+    qemu = _looping_qemu(tmp_path, marker)
+    created: list[object] = []
+
+    class FakeConsole:
+        def __init__(self, path: str) -> None:
+            self.path = path
+            self.sent: list[bytes] = []
+            self.bytes_received = 0
+            self.stopped = False
+
+        def send(self, data: bytes) -> bool:
+            self.sent.append(data)
+            return True
+
+        def snapshot(self) -> ConsoleSnapshot:
+            return ConsoleSnapshot(
+                rows=((Span("~ # "),),), cursor=(4, 0)
+            )
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr(
+        tui_app,
+        "SerialConsole",
+        lambda path: created.append(FakeConsole(path)) or created[-1],
     )
     app = _app(tmp_path, qemu=str(qemu))
     try:
@@ -214,21 +532,174 @@ def test_s_para_el_fake_y_sale_sin_hijos(
         async def run() -> None:
             async with app.run_test(size=(100, 35)) as pilot:
                 await pilot.pause()
-                await pilot.press("enter")
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                runtime_id = next(iter(app.sessions))
+                tab = await _wait_tab(pilot, app, runtime_id)
+                tab.query_one(SessionPanel).focus()
                 await pilot.pause()
                 await pilot.press("enter")
-                await pilot.pause(0.2)
-                assert isinstance(app.screen, SessionScreen)
-                _wait_for(marker)
+                await pilot.pause()
+                view = app.main_screen.tab_for(runtime_id).query_one(ConsoleView)
+                assert view.capture is True
+                assert view.has_class("capturing")
+
+                await pilot.press("q")
+                await pilot.pause()
+                assert isinstance(app.screen, MainScreen)
+                assert runtime_id in app.sessions
+
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+                assert isinstance(app.screen, MainScreen)
+
                 await pilot.press("s")
+                await pilot.pause()
+                assert isinstance(app.screen, MainScreen)
+
+                fake = created[0]
+                assert fake.sent == [b"q", b"\x03", b"s"]
+
+                await pilot.press("ctrl+q")
+                await pilot.pause()
+                assert isinstance(app.screen, CloseAllScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+                assert isinstance(app.screen, MainScreen)
+                assert runtime_id in app.sessions
+
+                await _close_active_and_wait(pilot, app)
+                assert isinstance(app.screen, ProfilesScreen)
+                await _quit_profiles(pilot, app)
 
         asyncio.run(run())
-        assert app.return_code == 0
-        child = int(marker.read_text(encoding="utf-8").strip())
-        with pytest.raises(ProcessLookupError):
-            os.kill(child, 0)
     finally:
-        _kill_marked_child(marker)
+        _kill_marked_children(marker)
+
+
+def test_cierre_total_pide_confirmacion_y_no_cierra_al_abrirla(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    marker = tmp_path / "qemu.pid"
+    qemu = _looping_qemu(tmp_path, marker)
+    app = VvmApp(
+        profiles_path=_two_profiles_file(tmp_path),
+        qemu=str(qemu),
+        refresh_interval=0.2,
+    )
+    sessions_seen = []
+    try:
+
+        async def run() -> None:
+            async with app.run_test(size=(110, 40)) as pilot:
+                await pilot.pause()
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                await _start_second(pilot)
+                await _wait_sessions(pilot, app, 2)
+                pids = _wait_lines(marker, 2)
+                sessions_seen.extend(
+                    app.sessions[key].session for key in app.sessions
+                )
+
+                await pilot.click("#close-all")
+                await pilot.pause()
+                assert isinstance(app.screen, CloseAllScreen)
+                assert all(session.running for session in sessions_seen)
+                assert all(
+                    runtime.report is None for runtime in app.sessions.values()
+                )
+
+                await pilot.press("enter")
+                await pilot.pause(1.0)
+                assert app.return_code == 0
+
+        asyncio.run(run())
+    finally:
+        _kill_marked_children(marker)
+
+    assert len(sessions_seen) == 2
+    assert all("Wipe: 8 MiB" in (report or "") for report in app.last_reports.values())
+    assert not any(_alive(pid) for pid in _wait_lines(marker, 2))
+
+
+def test_escape_no_para_ninguna_vm_en_la_confirmacion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    marker = tmp_path / "qemu.pid"
+    qemu = _looping_qemu(tmp_path, marker)
+    app = _app(tmp_path, qemu=str(qemu))
+    try:
+
+        async def run() -> None:
+            async with app.run_test(size=(100, 35)) as pilot:
+                await pilot.pause()
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                runtime_id = next(iter(app.sessions))
+                session = app.sessions[runtime_id].session
+
+                await pilot.press("ctrl+q")
+                await pilot.pause()
+                assert isinstance(app.screen, CloseAllScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+                assert isinstance(app.screen, MainScreen)
+                assert session.running
+                assert runtime_id in app.sessions
+
+                await _close_active_and_wait(pilot, app)
+
+        asyncio.run(run())
+    finally:
+        _kill_marked_children(marker)
+
+
+def test_sigterm_cierra_todas_las_vms_y_sale_con_143(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    marker = tmp_path / "qemu.pid"
+    qemu = _looping_qemu(tmp_path, marker)
+    app = _app(tmp_path, qemu=str(qemu))
+    runtime_id = ""
+    try:
+
+        async def run() -> None:
+            nonlocal runtime_id
+            async with app.run_test(size=(100, 35)) as pilot:
+                await pilot.pause()
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                runtime_id = next(iter(app.sessions))
+                pids = _wait_lines(marker, 1)
+                assert app.group.installed is True
+
+                os.kill(os.getpid(), signal.SIGTERM)
+                deadline = time.monotonic() + 5
+                while app.return_code is None:
+                    if time.monotonic() > deadline:
+                        raise AssertionError("la app no salió tras SIGTERM")
+                    await pilot.pause(0.1)
+
+                assert app.return_code == 143
+                report = app.sessions[runtime_id].report
+                assert report is not None
+                assert "Wipe: 8 MiB" in report
+                assert not _alive(pids[0])
+
+        asyncio.run(run())
+    finally:
+        _kill_marked_children(marker)
+
+
+def test_el_boton_de_cierre_total_esta_anclado_a_la_derecha():
+    css = (ROOT / "vvm" / "tui" / "app.tcss").read_text(encoding="utf-8")
+    assert "#close-all {" in css
+    block = css.split("#close-all {", 1)[1].split("}", 1)[0]
+    assert "dock: right" in block
 
 
 def test_tui_sin_tty_sale_2(
@@ -279,7 +750,6 @@ def test_tui_sin_toml_abre_lista_vacia_y_crea_el_primer_perfil(
         profiles_path=target,
         qemu="/bin/true",
         refresh_interval=0.05,
-        auto_exit_on_finish=False,
     )
 
     async def run() -> None:
@@ -326,7 +796,6 @@ def test_el_formulario_anade_un_perfil_a_un_toml_existente(
         profiles_path=target,
         qemu="/bin/true",
         refresh_interval=0.05,
-        auto_exit_on_finish=False,
     )
 
     async def run() -> None:
@@ -365,7 +834,6 @@ def test_el_formulario_rechaza_un_nombre_duplicado(
         profiles_path=target,
         qemu="/bin/true",
         refresh_interval=0.05,
-        auto_exit_on_finish=False,
     )
 
     async def run() -> None:
@@ -440,7 +908,6 @@ def test_editar_un_perfil_existente_conserva_el_resto(
         profiles_path=target,
         qemu="/bin/true",
         refresh_interval=0.05,
-        auto_exit_on_finish=False,
     )
 
     async def run() -> None:
@@ -479,7 +946,6 @@ def test_cancelar_el_borrado_no_toca_el_fichero(
         profiles_path=target,
         qemu="/bin/true",
         refresh_interval=0.05,
-        auto_exit_on_finish=False,
     )
 
     async def run() -> None:
@@ -517,7 +983,6 @@ def test_borrar_el_default_reasigna_el_siguiente(
         profiles_path=target,
         qemu="/bin/true",
         refresh_interval=0.05,
-        auto_exit_on_finish=False,
     )
 
     async def run() -> None:
@@ -557,35 +1022,29 @@ def test_la_sesion_respeta_el_wipe_del_perfil(
         ),
     )
     marker = tmp_path / "qemu.pid"
-    qemu = _fake_qemu(
-        tmp_path,
-        (
-            "sleep 0.3\n"
-            f"echo $$ > {marker}\n"
-            "trap 'exit 0' TERM\n"
-            "i=0; while [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\n"
-        ),
-    )
+    qemu = _looping_qemu(tmp_path, marker)
     app = VvmApp(
         profiles_path=target,
         qemu=str(qemu),
-        refresh_interval=0.05,
-        auto_exit_on_finish=False,
+        refresh_interval=0.2,
     )
     try:
 
         async def run() -> None:
             async with app.run_test(size=(110, 40)) as pilot:
                 await pilot.pause()
-                await pilot.press("enter")
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                runtime_id = next(iter(app.sessions))
+                await pilot.press("ctrl+g")
                 await pilot.pause()
-                await pilot.press("enter")
-                await pilot.pause(0.1)
-                _wait_for(marker)
                 await pilot.press("s")
+                await _wait_finished(pilot, app, runtime_id)
+                assert app.sessions[runtime_id].wipe is True
+                assert "Wipe: 8 MiB" in app.last_report
+                await _close_active_and_wait(pilot, app)
+                await _quit_profiles(pilot, app)
 
         asyncio.run(run())
-        assert app.last_report is not None
-        assert "Wipe: 8 MiB" in app.last_report
     finally:
-        _kill_marked_child(marker)
+        _kill_marked_children(marker)
