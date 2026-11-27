@@ -44,9 +44,9 @@ def _live(session_id: str, pid: int, **overrides) -> LiveSession:
 
 
 def test_new_session_id_es_kebab_y_regenera_colisiones(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    root = tmp_path / "runtime"
+    root = short_root
     (root / "kali-linux-aaaa").mkdir(parents=True)
     tokens = iter(["aaaa", "bbbb"])
     monkeypatch.setattr(supervisor.secrets, "token_hex", lambda _: next(tokens))
@@ -123,8 +123,8 @@ def test_prepare_session_dir_rechaza_una_ruta_de_socket_demasiado_larga(
         supervisor.prepare_session_dir("kali-3f2a", root=root)
 
 
-def test_write_y_remove_live(tmp_path: Path):
-    root = tmp_path / "runtime"
+def test_write_y_remove_live(short_root: Path):
+    root = short_root
     entry = _live("kali-3f2a", os.getpid())
 
     path = supervisor.write_live(entry, root=root)
@@ -138,8 +138,8 @@ def test_write_y_remove_live(tmp_path: Path):
     assert not path.parent.exists()
 
 
-def test_list_live_filtra_pid_muerto_y_poda(tmp_path: Path):
-    root = tmp_path / "runtime"
+def test_list_live_filtra_pid_muerto_y_poda(short_root: Path):
+    root = short_root
     child = subprocess.Popen(["/bin/true"])
     child.wait()
     entry = _live("kali-3f2a", child.pid)
@@ -149,8 +149,8 @@ def test_list_live_filtra_pid_muerto_y_poda(tmp_path: Path):
     assert not path.exists()
 
 
-def test_list_live_filtra_pid_que_no_es_qemu_vvm(tmp_path: Path):
-    root = tmp_path / "runtime"
+def test_list_live_filtra_pid_que_no_es_qemu_vvm(short_root: Path):
+    root = short_root
     entry = _live("kali-3f2a", os.getpid())
     path = supervisor.write_live(entry, root=root)
 
@@ -158,10 +158,10 @@ def test_list_live_filtra_pid_que_no_es_qemu_vvm(tmp_path: Path):
     assert not path.exists()
 
 
-def test_list_live_avisa_de_directorio_ilegible_y_no_poda(tmp_path: Path):
+def test_list_live_avisa_de_directorio_ilegible_y_no_poda(short_root: Path):
     if os.geteuid() == 0:
         pytest.skip("root ignora los permisos del directorio")
-    root = tmp_path / "runtime"
+    root = short_root
     directory = supervisor.prepare_session_dir("kali-3f2a", root=root)
     path = supervisor.write_live(_live("kali-3f2a", os.getpid()), root=root)
     warnings: list[str] = []
@@ -180,8 +180,8 @@ def test_list_live_avisa_de_directorio_ilegible_y_no_poda(tmp_path: Path):
     assert path.exists()
 
 
-def test_list_live_poda_un_pid_fuera_de_rango(tmp_path: Path):
-    root = tmp_path / "runtime"
+def test_list_live_poda_un_pid_fuera_de_rango(short_root: Path):
+    root = short_root
     path = supervisor.write_live(
         _live("kali-3f2a", 2**31), root=root
     )
@@ -190,8 +190,8 @@ def test_list_live_poda_un_pid_fuera_de_rango(tmp_path: Path):
     assert not path.exists()
 
 
-def test_list_live_ordena_y_conserva_las_vivas(tmp_path: Path):
-    root = tmp_path / "runtime"
+def test_list_live_ordena_y_conserva_las_vivas(short_root: Path):
+    root = short_root
     first = _live("kali-3f2a", os.getpid())
     second = _live("alpine-91b0", os.getpid(), label="alpine-min")
     supervisor.write_live(first, root=root)
@@ -202,8 +202,8 @@ def test_list_live_ordena_y_conserva_las_vivas(tmp_path: Path):
     assert [entry.id for entry in entries] == ["alpine-91b0", "kali-3f2a"]
 
 
-def test_list_live_poda_un_json_roto(tmp_path: Path):
-    root = tmp_path / "runtime"
+def test_list_live_poda_un_json_roto(short_root: Path):
+    root = short_root
     directory = supervisor.prepare_session_dir("rota-0001", root=root)
     path = directory / "live.json"
     path.write_text("{no es json", encoding="utf-8")

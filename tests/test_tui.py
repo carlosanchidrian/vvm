@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import asynccontextmanager
 import signal
 import subprocess
 import sys
@@ -250,6 +251,31 @@ async def _quit_profiles(pilot, app: VvmApp) -> None:
     if isinstance(app.screen, ProfilesScreen) and app.return_code is None:
         await pilot.press("q")
         await pilot.pause(0.3)
+
+
+@asynccontextmanager
+async def _running_app(app: VvmApp, size=(100, 35)):
+    """run_test que cierra la app aunque una aserción falle dentro."""
+    async with app.run_test(size=size) as pilot:
+        try:
+            yield pilot
+        finally:
+            if app.return_code is None:
+                app.exit(return_code=0)
+
+
+async def _wait_state(
+    pilot,
+    predicate,
+    message: str,
+    timeout: float = 5.0,
+) -> None:
+    """Espera activa de un efecto de la UI, con deadline y estado en el error."""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"{message} (estado actual: {predicate()!r})")
+        await pilot.pause(0.05)
 
 
 async def _close_active_and_wait(pilot, app: VvmApp, timeout: float = 8.0) -> None:
@@ -523,18 +549,24 @@ def test_captura_envia_teclas_al_guest_y_ctrl_q_sigue_disponible(
     try:
 
         async def run() -> None:
-            async with app.run_test(size=(100, 35)) as pilot:
+            async with _running_app(app) as pilot:
                 await pilot.pause()
                 await _start_first(pilot)
                 await _wait_sessions(pilot, app, 1)
                 runtime_id = next(iter(app.sessions))
                 tab = await _wait_tab(pilot, app, runtime_id)
-                tab.query_one(SessionPanel).focus()
-                await pilot.pause()
+                panel = tab.query_one(SessionPanel)
+                panel.focus()
+                await _wait_state(
+                    pilot, lambda: app.focused is panel, "el panel no recibió el foco"
+                )
                 await pilot.press("enter")
-                await pilot.pause()
                 view = app.main_screen.tab_for(runtime_id).query_one(ConsoleView)
-                assert view.capture is True
+                await _wait_state(
+                    pilot,
+                    lambda: view.capture,
+                    f"la captura no se activó (foco={app.focused!r})",
+                )
                 assert view.has_class("capturing")
 
                 await pilot.press("q")
@@ -625,7 +657,7 @@ def test_escape_no_para_ninguna_vm_en_la_confirmacion(
     try:
 
         async def run() -> None:
-            async with app.run_test(size=(100, 35)) as pilot:
+            async with _running_app(app) as pilot:
                 await pilot.pause()
                 await _start_first(pilot)
                 await _wait_sessions(pilot, app, 1)
@@ -636,12 +668,20 @@ def test_escape_no_para_ninguna_vm_en_la_confirmacion(
                 await pilot.pause()
                 assert isinstance(app.screen, CloseAllScreen)
                 await pilot.press("escape")
-                await pilot.pause()
-                assert isinstance(app.screen, MainScreen)
-                assert session.running
+                await _wait_state(
+                    pilot,
+                    lambda: isinstance(app.screen, MainScreen),
+                    "escape no volvió al centro de control",
+                )
+                await _wait_state(
+                    pilot,
+                    lambda: session.running,
+                    "escape paró la VM en vez de cancelar el modal",
+                )
                 assert runtime_id in app.sessions
 
                 await _close_active_and_wait(pilot, app)
+                await _quit_profiles(pilot, app)
 
         asyncio.run(run())
     finally:
