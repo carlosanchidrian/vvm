@@ -654,10 +654,10 @@ class MainScreen(Screen):
             )
             yield Static("VVM · 0 VMs", id="topbar-title")
             yield Button(
-                "🗑",
+                "✖",
                 id="close-all",
                 variant="error",
-                tooltip="Cerrar todo + wipe",
+                tooltip="Cerrar todas las VM y hacer wipe (Ctrl-Q)",
             )
         yield Static("sin VMs · n abre perfiles", id="empty-state")
         yield Horizontal(id="tabstrip")

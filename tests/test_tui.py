@@ -767,8 +767,8 @@ def test_home_y_cierre_total_en_la_barra_superior(
 
                 texto = app.export_text()
                 assert "⌂" in texto
-                assert "🗑" in texto
-                assert app.main_screen.query_one("#close-all", Button).label == "🗑"
+                assert "✖" in texto
+                assert app.main_screen.query_one("#close-all", Button).label == "✖"
                 assert "Arrancar una VM" not in texto
 
                 await pilot.click("#home")

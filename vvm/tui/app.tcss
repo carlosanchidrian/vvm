@@ -125,8 +125,7 @@ Footer {
 }
 
 #topbar {
-    height: 2;
-    align: left middle;
+    height: 1;
     background: $primary;
     color: $text;
     padding: 0 1;
@@ -162,7 +161,7 @@ Footer {
     width: 5;
     min-width: 5;
     background: $error-darken-1;
-    color: #ffd9d9;
+    color: #ffe3e3;
     text-style: bold;
 }
 
