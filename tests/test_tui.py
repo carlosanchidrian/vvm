@@ -768,6 +768,7 @@ def test_home_y_cierre_total_en_la_barra_superior(
                 texto = app.export_text()
                 assert "⌂" in texto
                 assert "✖" in texto
+                assert "palette" not in texto
                 assert app.main_screen.query_one("#close-all", Button).label == "✖"
                 assert "Arrancar una VM" not in texto
 
@@ -1344,3 +1345,7 @@ def test_cada_pestana_tiene_su_x_y_cierra_solo_esa_vm(
         asyncio.run(run())
     finally:
         _kill_marked_children(marker)
+
+def test_sin_paleta_de_comandos():
+    """La paleta de Textual solo ofrece tema/salir/teclas/captura: no va en VVM."""
+    assert VvmApp.ENABLE_COMMAND_PALETTE is False

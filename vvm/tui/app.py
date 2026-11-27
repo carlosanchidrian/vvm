@@ -52,6 +52,9 @@ class VvmApp(App):
     CSS_PATH = "app.tcss"
     TITLE = "VVM — Volatile Virtual Machines"
     CONSOLE_FPS = CONSOLE_FPS
+    # Sin paleta de comandos: la de Textual solo ofrece tema, salir, teclas y
+    # captura SVG; ninguna acción de VVM está ahí y su atajo ocupaba el footer.
+    ENABLE_COMMAND_PALETTE = False
 
     BINDINGS = [
         Binding("ctrl+g", "open_vm_menu", "Menú VM", priority=True, show=False),
