@@ -299,7 +299,7 @@ class SessionTab(Vertical):
     def _header(self) -> str:
         session = self.runtime.session
         return (
-            f"{self.symbol} {self.runtime.id} · {self.runtime.label} · "
+            f"{self.runtime.id} · {self.runtime.label} · "
             f"{self.runtime.state} · {self._uptime():.1f} s · "
             f"{session.config.mem_mb} MB · PID "
             f"{session.pid if session.started else 0}"
