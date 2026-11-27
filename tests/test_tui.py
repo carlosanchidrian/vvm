@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("textual")
 pytest.importorskip("pyte")
 
-from textual.widgets import DataTable, Input, Select, Tabs  # noqa: E402
+from textual.widgets import Button, DataTable, Input, Select, Tabs  # noqa: E402
 
 import vvm.tui.app as tui_app  # noqa: E402
 from vvm import cli, host_check, profiles, vm  # noqa: E402
@@ -766,8 +766,9 @@ def test_home_y_cierre_total_en_la_barra_superior(
                 sessions = [runtime.session for runtime in app.sessions.values()]
 
                 texto = app.export_text()
-                assert "✕" in texto
                 assert "⌂" in texto
+                assert "🗑" in texto
+                assert app.main_screen.query_one("#close-all", Button).label == "🗑"
                 assert "Arrancar una VM" not in texto
 
                 await pilot.click("#home")
@@ -825,13 +826,16 @@ def test_home_y_cierre_total_en_la_barra_superior(
 
 def test_el_boton_de_cierre_total_esta_anclado_a_la_derecha():
     css = (ROOT / "vvm" / "tui" / "app.tcss").read_text(encoding="utf-8")
-    assert "#close-all {" in css
-    block = css.split("#close-all {", 1)[1].split("}", 1)[0]
+    assert "#topbar #close-all {" in css
+    block = css.split("#topbar #close-all {", 1)[1].split("}", 1)[0]
     assert "dock: right" in block
-    assert "#home {" in css
-    home = css.split("#home {", 1)[1].split("}", 1)[0]
+    assert "#topbar #home {" in css
+    home = css.split("#topbar #home {", 1)[1].split("}", 1)[0]
     assert "dock: left" in home
     assert "#3b82f6" in home
+    assert "$error-darken-1" in block
+    strip = css.split("#tabstrip {", 1)[1].split("}", 1)[0]
+    assert "margin-top: 1" in strip
 
 
 def test_tui_sin_tty_sale_2(

@@ -125,7 +125,8 @@ Footer {
 }
 
 #topbar {
-    height: 1;
+    height: 2;
+    align: left middle;
     background: $primary;
     color: $text;
     padding: 0 1;
@@ -151,14 +152,23 @@ Footer {
     text-style: bold;
 }
 
-#home {
+#topbar #home {
     dock: left;
     color: #3b82f6;
 }
 
-#close-all {
+#topbar #close-all {
     dock: right;
-    color: $error;
+    width: 5;
+    min-width: 5;
+    background: $error-darken-1;
+    color: #ffd9d9;
+    text-style: bold;
+}
+
+#topbar #close-all:hover {
+    background: $error;
+    color: $text;
 }
 
 #topbar Button:hover {
@@ -188,8 +198,9 @@ Footer {
 
 #tabstrip {
     height: 1;
-    background: $surface;
+    background: $panel;
     padding: 0 1;
+    margin-top: 1;
 }
 
 #tabstrip .tabitem {

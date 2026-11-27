@@ -654,7 +654,7 @@ class MainScreen(Screen):
             )
             yield Static("VVM · 0 VMs", id="topbar-title")
             yield Button(
-                "✕",
+                "🗑",
                 id="close-all",
                 variant="error",
                 tooltip="Cerrar todo + wipe",
