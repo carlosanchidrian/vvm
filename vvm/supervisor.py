@@ -25,6 +25,8 @@ from typing import Any
 from vvm import audit
 
 RUNTIME_MODE = 0o700
+_UNIX_SOCKET_MAX = 107
+_MAX_SLUG = 32
 _LIVE_NAME = "live.json"
 _SOCKET_NAME = "serie.sock"
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -37,11 +39,44 @@ def _check_id(session_id: str) -> str:
     return session_id
 
 
+def _fits_unix_socket(directory: Path) -> bool:
+    """True si `<directory>/serie.sock` cabe en `sun_path` (107 bytes)."""
+    return len(os.fsencode(str(directory / _SOCKET_NAME))) <= _UNIX_SOCKET_MAX
+
+
+def _root_fits(root: Path) -> bool:
+    """Reserva sitio para un id máximo y para su `serie.sock`."""
+    probe = root / ("x" * (_MAX_SLUG + 5))
+    return _fits_unix_socket(probe)
+
+
+def _fallback_runtime_roots() -> tuple[Path, ...]:
+    uid = os.getuid()
+    return (
+        Path(f"/run/user/{uid}") / "vvm" / "sessions",
+        Path("/tmp") / f"vvm-{uid}" / "sessions",
+    )
+
+
 def runtime_root() -> Path:
-    """`$XDG_RUNTIME_DIR/vvm/sessions` o el temporal del sistema."""
+    """Runtime de sesiones, con una raíz corta si XDG no cabe en AF_UNIX."""
     base = os.environ.get("XDG_RUNTIME_DIR", "")
-    root = Path(base) if base else Path(tempfile.gettempdir())
-    return root / "vvm" / "sessions"
+    preferred = (
+        Path(base) if base else Path(tempfile.gettempdir())
+    ) / "vvm" / "sessions"
+    if _root_fits(preferred):
+        return preferred
+    for candidate in _fallback_runtime_roots():
+        if not _root_fits(candidate):
+            continue
+        try:
+            candidate.mkdir(parents=True, exist_ok=True, mode=RUNTIME_MODE)
+            os.chmod(candidate, RUNTIME_MODE)
+        except OSError:
+            continue
+        if os.access(candidate, os.W_OK):
+            return candidate
+    return preferred
 
 
 def kebab_case(label: str) -> str:
@@ -53,7 +88,7 @@ def kebab_case(label: str) -> str:
 def new_session_id(label: str, *, root: Path | None = None) -> str:
     """Genera `<perfil>-<4 hex>` y regenera si el directorio ya existe."""
     base = Path(root) if root is not None else runtime_root()
-    slug = kebab_case(label)
+    slug = kebab_case(label)[:_MAX_SLUG].strip("-") or "vm"
     for _ in range(100):
         candidate = f"{slug}-{secrets.token_hex(2)}"
         if not (base / candidate).exists() and not audit.session_path_for(
@@ -96,6 +131,12 @@ def _ensure_session_dir(
         except OSError:
             pass
     directory = base / session_id
+    if not _fits_unix_socket(directory):
+        raise ValueError(
+            f"La ruta del socket serie es demasiado larga para AF_UNIX: "
+            f"{directory / _SOCKET_NAME} ({len(os.fsencode(str(directory / _SOCKET_NAME)))} bytes, "
+            f"máximo {_UNIX_SOCKET_MAX})"
+        )
     directory.mkdir(mode=RUNTIME_MODE, exist_ok=exist_ok)
     os.chmod(directory, RUNTIME_MODE)
     return directory

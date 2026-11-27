@@ -217,6 +217,23 @@ def test_finish_ignora_procesos_y_memfds_de_otras_sesiones(
     )
     snapshots = iter((before, after))
     monkeypatch.setattr(
+        supervisor,
+        "list_live",
+        lambda **kwargs: (
+            supervisor.LiveSession(
+                id="otra-1111",
+                label="otra",
+                pid=111,
+                mem_mb=256,
+                disk_mb=0,
+                image=False,
+                started_at="2026-11-26T18:40:12Z",
+                serial="socket",
+                serial_path=None,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
         audit,
         "memfd_names_of",
         lambda pid, proc_dir=audit.PROC_PATH: (
@@ -247,6 +264,35 @@ def test_finish_ignora_procesos_y_memfds_de_otras_sesiones(
     assert current.after.qemu_pids == ()
     assert "memfd:otro" not in (current.before.memfds or ())
     assert "memfd:otro" not in (current.after.memfds or ())
+
+
+def test_un_qemu_ajeno_no_registrado_sigue_siendo_hallazgo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    kernel, initrd = _boot(tmp_path)
+    before = _snapshot()
+    after = _snapshot(qemu_pids=("222",))
+    snapshots = iter((before, after))
+    monkeypatch.setattr(supervisor, "list_live", lambda **kwargs: ())
+    current = Session(
+        VmConfig(
+            kernel=str(kernel),
+            initrd=str(initrd),
+            mem_mb=256,
+            disk_mb=0,
+        ),
+        qemu="/bin/true",
+        checks=(),
+        label="uno",
+        install_signals=False,
+        snapshotter=lambda: next(snapshots),
+    )
+    current.start()
+    current.wait()
+    report = current.finish(wipe=False)
+
+    assert "proceso QEMU vivo al cierre: pid 222" in report
+    assert current.after.qemu_pids == ("222",)
 
 
 def test_dos_sesiones_se_registran_y_guardan_por_id(

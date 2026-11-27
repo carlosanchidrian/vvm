@@ -268,7 +268,9 @@ porque el guest tiene un disco virtio. En modo kernel, `write_bytes=0` es el
 testigo. Si se arrancó con `--force` y había fallos bloqueantes, el veredicto lo
 dice. La ruta y el tamaño del log se guardan con la sesión, así que
 `audit <ID>` reproduce la sección del log aunque el fichero se mueva o se
-borre después.
+borre después. La salida del informe termina exactamente en el salto de línea
+del propio informe, sin una línea en blanco adicional, tanto en `run` como en
+`audit`.
 
 ## Qué garantiza la línea de QEMU
 
@@ -326,5 +328,5 @@ vvm/
 ├── cli.py          # argparse: check | run | audit | ps | profiles | tui
 ├── tui/            # Textual opcional: app, pantallas, widgets y CSS
 └── __main__.py     # python3 -m vvm
-tests/              # 328 tests, sin KVM
+tests/              # 331 tests, sin KVM
 ```

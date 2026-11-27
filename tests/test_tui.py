@@ -284,7 +284,6 @@ async def _start_second(pilot) -> None:
 def test_carga_perfiles_entra_al_prechequeo_y_sale_con_q(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     app = _app(tmp_path)
 
     async def run() -> None:
@@ -306,7 +305,6 @@ def test_carga_perfiles_entra_al_prechequeo_y_sale_con_q(
 def test_la_linea_de_la_tui_lleva_la_serie_a_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     app = _app(tmp_path)
     loaded = profiles.load_profiles(tmp_path / "profiles.toml")
     profile = loaded.get("min")
@@ -337,7 +335,6 @@ def test_la_linea_de_la_tui_lleva_la_serie_a_socket(
 def test_qemu_true_termina_y_muestra_el_informe_sin_cerrar_la_app(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     app = _app(tmp_path)
 
     async def run() -> None:
@@ -368,7 +365,6 @@ def test_qemu_true_termina_y_muestra_el_informe_sin_cerrar_la_app(
 def test_s_para_el_fake_y_deja_el_informe_en_la_pestana(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     marker = tmp_path / "qemu.pid"
     qemu = _looping_qemu(tmp_path, marker)
     app = _app(tmp_path, qemu=str(qemu))
@@ -401,7 +397,6 @@ def test_s_para_el_fake_y_deja_el_informe_en_la_pestana(
 def test_dos_vms_pestanas_y_cierre_granular(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     marker = tmp_path / "qemu.pid"
     qemu = _looping_qemu(tmp_path, marker)
     app = VvmApp(
@@ -456,7 +451,6 @@ def test_dos_vms_pestanas_y_cierre_granular(
 def test_q_sin_captura_cierra_solo_la_vm_activa(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     marker = tmp_path / "qemu.pid"
     qemu = _looping_qemu(tmp_path, marker)
     app = VvmApp(
@@ -497,7 +491,6 @@ def test_q_sin_captura_cierra_solo_la_vm_activa(
 def test_captura_envia_teclas_al_guest_y_ctrl_q_sigue_disponible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     marker = tmp_path / "qemu.pid"
     qemu = _looping_qemu(tmp_path, marker)
     created: list[object] = []
@@ -580,7 +573,6 @@ def test_captura_envia_teclas_al_guest_y_ctrl_q_sigue_disponible(
 def test_cierre_total_pide_confirmacion_y_no_cierra_al_abrirla(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     marker = tmp_path / "qemu.pid"
     qemu = _looping_qemu(tmp_path, marker)
     app = VvmApp(
@@ -627,7 +619,6 @@ def test_cierre_total_pide_confirmacion_y_no_cierra_al_abrirla(
 def test_escape_no_para_ninguna_vm_en_la_confirmacion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     marker = tmp_path / "qemu.pid"
     qemu = _looping_qemu(tmp_path, marker)
     app = _app(tmp_path, qemu=str(qemu))
@@ -660,7 +651,6 @@ def test_escape_no_para_ninguna_vm_en_la_confirmacion(
 def test_sigterm_cierra_todas_las_vms_y_sale_con_143(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     marker = tmp_path / "qemu.pid"
     qemu = _looping_qemu(tmp_path, marker)
     app = _app(tmp_path, qemu=str(qemu))
@@ -743,13 +733,12 @@ def test_tui_con_perfil_explicito_y_sin_fichero_sale_2(
 def test_tui_sin_toml_abre_lista_vacia_y_crea_el_primer_perfil(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     target = tmp_path / "config" / "vvm" / "profiles.toml"
     kernel, initrd = _boot(tmp_path)
     app = VvmApp(
         profiles_path=target,
         qemu="/bin/true",
-        refresh_interval=0.05,
+        refresh_interval=0.5,
     )
 
     async def run() -> None:
@@ -788,14 +777,13 @@ def test_tui_sin_toml_abre_lista_vacia_y_crea_el_primer_perfil(
 def test_el_formulario_anade_un_perfil_a_un_toml_existente(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     target = _profiles_file(tmp_path)
     iso = tmp_path / "live.iso"
     iso.write_bytes(b"ISO" * 1024)
     app = VvmApp(
         profiles_path=target,
         qemu="/bin/true",
-        refresh_interval=0.05,
+        refresh_interval=0.5,
     )
 
     async def run() -> None:
@@ -827,13 +815,12 @@ def test_el_formulario_anade_un_perfil_a_un_toml_existente(
 def test_el_formulario_rechaza_un_nombre_duplicado(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     target = _profiles_file(tmp_path)
     original = target.read_text(encoding="utf-8")
     app = VvmApp(
         profiles_path=target,
         qemu="/bin/true",
-        refresh_interval=0.05,
+        refresh_interval=0.5,
     )
 
     async def run() -> None:
@@ -891,7 +878,6 @@ def test_invariante_sin_rutas_proc_en_la_tui():
 def test_editar_un_perfil_existente_conserva_el_resto(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     target = _profiles_file(tmp_path)
     iso = tmp_path / "live.iso"
     iso.write_bytes(b"ISO" * 1024)
@@ -907,7 +893,7 @@ def test_editar_un_perfil_existente_conserva_el_resto(
     app = VvmApp(
         profiles_path=target,
         qemu="/bin/true",
-        refresh_interval=0.05,
+        refresh_interval=0.5,
     )
 
     async def run() -> None:
@@ -939,13 +925,12 @@ def test_editar_un_perfil_existente_conserva_el_resto(
 def test_cancelar_el_borrado_no_toca_el_fichero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     target = _profiles_file(tmp_path)
     original = target.read_text(encoding="utf-8")
     app = VvmApp(
         profiles_path=target,
         qemu="/bin/true",
-        refresh_interval=0.05,
+        refresh_interval=0.5,
     )
 
     async def run() -> None:
@@ -966,7 +951,6 @@ def test_cancelar_el_borrado_no_toca_el_fichero(
 def test_borrar_el_default_reasigna_el_siguiente(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     target = _profiles_file(tmp_path)
     iso = tmp_path / "live.iso"
     iso.write_bytes(b"ISO" * 1024)
@@ -982,7 +966,7 @@ def test_borrar_el_default_reasigna_el_siguiente(
     app = VvmApp(
         profiles_path=target,
         qemu="/bin/true",
-        refresh_interval=0.05,
+        refresh_interval=0.5,
     )
 
     async def run() -> None:
@@ -1007,7 +991,6 @@ def test_borrar_el_default_reasigna_el_siguiente(
 def test_la_sesion_respeta_el_wipe_del_perfil(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
 ):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     target = _profiles_file(tmp_path)
     kernel, initrd = _boot(tmp_path)
     profiles.update_profile(

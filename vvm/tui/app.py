@@ -361,23 +361,34 @@ class VvmApp(App):
         if self.main_screen is not None:
             self.main_screen.update_tab_label(runtime.id)
         self.run_worker(
-            lambda: self._finish_worker(runtime, wipe, stop, remove),
-            thread=True,
+            self._finish_async(runtime, wipe, stop, remove),
             group="finish",
         )
 
-    def _finish_worker(
+    async def _finish_async(
         self,
         runtime: SessionRuntime,
         wipe: bool,
         stop: bool,
         remove: bool,
     ) -> None:
+        """Cierra sin bloquear el bucle: el I/O pesado va a un hilo."""
+        report = await asyncio.to_thread(
+            self._finish_blocking, runtime, wipe, stop
+        )
+        self._finish_done(runtime, report, remove)
+
+    def _finish_blocking(
+        self,
+        runtime: SessionRuntime,
+        wipe: bool,
+        stop: bool,
+    ) -> str:
         current = runtime.session
         try:
             if stop and current.running:
                 current.stop()
-            report = (
+            return (
                 current.report
                 if current.finished
                 else current.finish(wipe=wipe)
@@ -387,17 +398,9 @@ class VvmApp(App):
                 current.close()
             except (OSError, RuntimeError):
                 pass
-            report = f"Error al cerrar la VM: {exc}"
+            return f"Error al cerrar la VM: {exc}"
         finally:
             runtime.console.stop()
-        try:
-            self.call_from_thread(
-                self._finish_done, runtime, report, remove
-            )
-        except RuntimeError:
-            # La app se cerró mientras terminaba el worker: no hay UI que
-            # actualizar, pero la sesión ya quedó cerrada.
-            pass
 
     def _finish_done(
         self,
@@ -543,17 +546,26 @@ class VvmApp(App):
             self.exit(return_code=exit_code)
             return
         self.run_worker(
-            lambda: self._close_all_worker(runtimes, wipe, exit_code),
-            thread=True,
+            self._close_all_async(runtimes, wipe, exit_code),
             group="close-all",
         )
 
-    def _close_all_worker(
+    async def _close_all_async(
         self,
         runtimes: Sequence[SessionRuntime],
         wipe: bool,
         exit_code: int,
     ) -> None:
+        reports = await asyncio.to_thread(
+            self._close_all_blocking, runtimes, wipe
+        )
+        self._close_all_done(reports, exit_code)
+
+    def _close_all_blocking(
+        self,
+        runtimes: Sequence[SessionRuntime],
+        wipe: bool,
+    ) -> dict[str, str | None]:
         reports: dict[str, str | None] = {}
         for runtime in list(runtimes):
             current = runtime.session
@@ -573,12 +585,7 @@ class VvmApp(App):
                 reports[runtime.id] = f"Error al cerrar la VM: {exc}"
             finally:
                 runtime.console.stop()
-        try:
-            self.call_from_thread(
-                self._close_all_done, reports, exit_code
-            )
-        except RuntimeError:
-            pass
+        return reports
 
     def _close_all_done(
         self,

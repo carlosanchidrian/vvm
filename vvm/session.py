@@ -129,6 +129,7 @@ class Session:
         self.last_io: IOStats | None = None
         self.started_at: float | None = None
         self.other_sessions = 0
+        self._other_pids: set[int] = set()
 
         self._proc: subprocess.Popen | None = None
         self._disk_fd: int | None = None
@@ -271,9 +272,15 @@ class Session:
         self.before = self._snapshot()
         try:
             self._prepare_registration()
-            self.other_sessions = supervisor.count_others(
-                exclude=self.session_id
+            others = supervisor.list_live()
+            self.other_sessions = sum(
+                1 for entry in others if entry.id != self.session_id
             )
+            self._other_pids = {
+                entry.pid
+                for entry in others
+                if entry.id != self.session_id
+            }
             if self.config.disk_mb > 0:
                 self._disk_fd = images.create_disk_fd(self.config.disk_mb)
             if self.config.image:
@@ -479,23 +486,25 @@ class Session:
         assert self.before is not None
         assert self.after is not None
         own_pid = str(self._proc.pid) if self._proc is not None else None
-        other_pids = (
-            set(self.before.qemu_pids) | set(self.after.qemu_pids)
+        # Solo se excluyen las sesiones registradas (live.json), no cualquier
+        # QEMU ajeno: un proceso no registrado debe seguir siendo hallazgo.
+        self._other_pids.update(
+            entry.pid
+            for entry in supervisor.list_live()
+            if entry.id != self.session_id
         )
+        other_pids = set(self._other_pids)
         if own_pid is not None:
-            other_pids.discard(own_pid)
+            other_pids.discard(int(own_pid))
         excluded_memfds: set[str] = set()
         for pid in other_pids:
-            if pid.isdigit():
-                excluded_memfds.update(
-                    audit.memfd_names_of(int(pid))
-                )
+            excluded_memfds.update(audit.memfd_names_of(pid))
 
         def isolate(snapshot: audit.Snapshot) -> audit.Snapshot:
-            pids = (
-                tuple(pid for pid in snapshot.qemu_pids if pid == own_pid)
-                if own_pid is not None
-                else ()
+            pids = tuple(
+                pid
+                for pid in snapshot.qemu_pids
+                if not (pid.isdigit() and int(pid) in other_pids)
             )
             memfds = snapshot.memfds
             if memfds is not None and excluded_memfds:

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import socket
 import stat
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -15,6 +17,14 @@ import pytest
 
 from vvm import supervisor
 from vvm.supervisor import LiveSession, SessionGroup
+
+
+@pytest.fixture
+def short_root():
+    """Runtime corto: tmp_path puede acercarse al límite de AF_UNIX."""
+    path = Path(tempfile.mkdtemp(prefix="vvm-", dir="/tmp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _live(session_id: str, pid: int, **overrides) -> LiveSession:
@@ -48,10 +58,8 @@ def test_new_session_id_es_kebab_y_regenera_colisiones(
     assert supervisor.kebab_case("???") == "vm"
 
 
-def test_prepare_session_dir_es_0700_y_borra_el_socket_anterior(
-    tmp_path: Path,
-):
-    root = tmp_path / "runtime"
+def test_prepare_session_dir_es_0700_y_borra_el_socket_anterior(short_root: Path):
+    root = short_root
     directory = supervisor.prepare_session_dir("kali-3f2a", root=root)
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
 
@@ -72,8 +80,8 @@ def test_prepare_session_dir_es_0700_y_borra_el_socket_anterior(
         )
 
 
-def test_reserve_session_no_comparte_directorio(tmp_path: Path):
-    root = tmp_path / "runtime"
+def test_reserve_session_no_comparte_directorio(short_root: Path):
+    root = short_root
     first_id, first_dir = supervisor.reserve_session(
         "kali", root=root
     )
@@ -84,6 +92,35 @@ def test_reserve_session_no_comparte_directorio(tmp_path: Path):
     assert first_id != second_id
     assert first_dir != second_dir
     assert first_dir.is_dir() and second_dir.is_dir()
+
+
+def test_runtime_root_cae_a_una_raiz_corta_si_xdg_no_cabe(
+    tmp_path: Path, short_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv(
+        "XDG_RUNTIME_DIR", str(tmp_path / ("x" * 200))
+    )
+    monkeypatch.setattr(
+        supervisor, "_fallback_runtime_roots", lambda: (short_root,)
+    )
+
+    root = supervisor.runtime_root()
+    session_id, directory = supervisor.reserve_session("kali")
+
+    assert root == short_root
+    assert directory == short_root / session_id
+    assert len(
+        os.fsencode(str(directory / "serie.sock"))
+    ) <= supervisor._UNIX_SOCKET_MAX
+
+
+def test_prepare_session_dir_rechaza_una_ruta_de_socket_demasiado_larga(
+    short_root: Path,
+):
+    root = short_root / ("y" * 100)
+
+    with pytest.raises(ValueError, match="demasiado larga para AF_UNIX"):
+        supervisor.prepare_session_dir("kali-3f2a", root=root)
 
 
 def test_write_y_remove_live(tmp_path: Path):
