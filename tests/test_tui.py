@@ -1228,3 +1228,50 @@ def test_el_selector_arranca_otra_vm_sin_cerrar_las_vivas(
         asyncio.run(run())
     finally:
         _kill_marked_children(marker)
+
+def test_la_pista_de_teclas_no_repite_el_footer_y_se_oculta_al_capturar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    monkeypatch.setattr(tui_app.VvmApp, "CONSOLE_FPS", 0)
+    marker = tmp_path / "qemu.pid"
+    qemu = _looping_qemu(tmp_path, marker)
+    app = VvmApp(
+        profiles_path=_profiles_file(tmp_path),
+        qemu=str(qemu),
+        refresh_interval=0.2,
+    )
+    try:
+
+        async def run() -> None:
+            async with _running_app(app, (100, 32)) as pilot:
+                await pilot.pause()
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                app._refresh_sessions()
+                await pilot.pause()
+
+                tab = app.main_screen.active_tab()
+                pista = tab.query_one(".console-hint")
+                assert pista.display is True
+                assert "enter: consola" in str(pista.render())
+                # ni el `q` ni el cierre total se repiten: los lleva el footer
+                assert "cerrar" not in str(pista.render()).lower()
+
+                view = tab.query_one(ConsoleView)
+                view.enter_capture()
+                app._refresh_sessions()
+                await pilot.pause()
+                assert view.capture is True
+                assert pista.display is False
+
+                view.leave_capture()
+                app._refresh_sessions()
+                await pilot.pause()
+                assert pista.display is True
+
+                await _close_active_and_wait(pilot, app)
+                await _quit_profiles(pilot, app)
+
+        asyncio.run(run())
+    finally:
+        _kill_marked_children(marker)

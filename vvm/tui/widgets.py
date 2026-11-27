@@ -69,15 +69,7 @@ class SessionPanel(Static):
     ) -> None:
         """Compone el panel con la última muestra; nunca lee ficheros él mismo."""
         io: IOStats | None = session.io()
-        elapsed = 0.0
-        if session.started_at is not None:
-            elapsed = max(0.0, time.monotonic() - session.started_at)
-        pid = session.pid if session.started else 0
-        lines: list[Text] = [
-            Text(
-                f"Estado: {self.state}    Sesión: {elapsed:6.1f} s    PID: {pid}"
-            )
-        ]
+        lines: list[Text] = []
         if io is None:
             lines.append(Text("I/O: no disponible (el proceso ya no existe)."))
         else:
@@ -326,7 +318,6 @@ class SessionTab(Vertical):
         parts = [console_state]
         if self.runtime.session.config.image:
             parts.append("ventana GTK")
-        parts.append(f"wipe: {'sí' if self.runtime.wipe else 'no'}")
         return " · ".join(parts)
 
     def refresh_view(self, snapshot: audit.Snapshot | None) -> None:
@@ -351,12 +342,16 @@ class SessionTab(Vertical):
             self.query_one(f"#session-meta-{self.runtime.id}", Static).update(
                 self._meta()
             )
-            hint = (
-                "CAPTURA — Ctrl-G menú"
-                if self._console_view().capture
-                else "enter: consola · Ctrl-G: menú · q: cerrar esta VM"
-            )
-            self.query_one(f"#console-hint-{self.runtime.id}", Static).update(hint)
+            hint = self.query_one(f"#console-hint-{self.runtime.id}", Static)
+            if self.runtime.report is not None:
+                hint.display = True
+                hint.update("informe de la sesión · q cierra la pestaña")
+            elif self._console_view().capture:
+                # Con captura el borde verde y su título ya lo dicen todo.
+                hint.display = False
+            else:
+                hint.display = True
+                hint.update("enter: consola · Ctrl-G: menú")
         except NoMatches:
             return
         if self._report_view is not None and self.runtime.report is not None:
@@ -413,9 +408,9 @@ class SessionTab(Vertical):
             self.query_one(f"#session-header-{self.runtime.id}", Static).update(
                 self._header()
             )
-            self.query_one(f"#console-hint-{self.runtime.id}", Static).update(
-                "informe de la sesión · q cierra la pestaña"
-            )
+            hint = self.query_one(f"#console-hint-{self.runtime.id}", Static)
+            hint.display = True
+            hint.update("informe de la sesión · q cierra la pestaña")
             self.query_one(SessionPanel).update_state("terminada")
         except NoMatches:
             # La pestaña aún se está montando: `on_mount` pintará el informe.
