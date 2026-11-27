@@ -660,6 +660,7 @@ class MainScreen(Screen):
                 tooltip="Cerrar todo + wipe",
             )
         yield Static("sin VMs · n abre perfiles", id="empty-state")
+        yield Horizontal(id="tabstrip")
         yield TabbedContent(id="session-tabs")
         yield Footer()
 
@@ -693,6 +694,7 @@ class MainScreen(Screen):
         self.tabs_by_id[runtime.id] = tab
         self.pane_order.append(runtime.id)
         tabs.active = self._pane_id(runtime.id)
+        await self._add_tab_buttons(runtime, tab)
         self._focus_tab(runtime.id)
         self.call_after_refresh(self._focus_tab, runtime.id)
         self._update_empty()
@@ -704,6 +706,9 @@ class MainScreen(Screen):
             self.pane_order.remove(runtime_id)
         if pane_id in [pane.id for pane in self.query(TabPane)]:
             await self.query_one(TabbedContent).remove_pane(pane_id)
+        item = self._tab_item(runtime_id)
+        if item is not None:
+            await item.remove()
         if self.pane_order:
             active = self.active_runtime_id() or self.pane_order[0]
             self._focus_tab(active)
@@ -711,6 +716,53 @@ class MainScreen(Screen):
 
     def tab_for(self, runtime_id: str) -> SessionTab | None:
         return self.tabs_by_id.get(runtime_id)
+
+    def _tab_item(self, runtime_id: str) -> Horizontal | None:
+        try:
+            return self.query_one(f"#tabitem-{runtime_id}", Horizontal)
+        except NoMatches:
+            return None
+
+    async def _add_tab_buttons(self, runtime: SessionRuntime, tab: SessionTab) -> None:
+        """Pestaña con forma de navegador: etiqueta que activa y ✕ que cierra."""
+        strip = self.query_one("#tabstrip", Horizontal)
+        item = Horizontal(
+            Button(
+                f"{tab.symbol} {runtime.label}",
+                id=f"tabbtn-{runtime.id}",
+                classes="tabbtn",
+                tooltip=f"Ir a {runtime.label}",
+            ),
+            Button(
+                "✕",
+                id=f"tabclose-{runtime.id}",
+                classes="tabclose",
+                tooltip=f"Cerrar {runtime.label} (igual que q)",
+            ),
+            id=f"tabitem-{runtime.id}",
+            classes="tabitem",
+        )
+        await strip.mount(item)
+        self._mark_active_tab()
+        self.call_after_refresh(self._mark_active_tab)
+
+    def _mark_active_tab(self) -> None:
+        active = self.active_runtime_id()
+        for runtime_id in self.tabs_by_id:
+            for widget_id in (f"#tabbtn-{runtime_id}", f"#tabclose-{runtime_id}"):
+                try:
+                    widget = self.query_one(widget_id, Button)
+                except NoMatches:
+                    continue
+                widget.set_class(runtime_id == active, "active-tab")
+
+    def activate_runtime(self, runtime_id: str) -> None:
+        if runtime_id not in self.tabs_by_id:
+            return
+        self.query_one(TabbedContent).active = self._pane_id(runtime_id)
+        self._mark_active_tab()
+        self._focus_tab(runtime_id)
+        self.call_after_refresh(self._focus_tab, runtime_id)
 
     def active_tab(self) -> SessionTab | None:
         runtime_id = self.active_runtime_id()
@@ -759,6 +811,7 @@ class MainScreen(Screen):
         self, event: TabbedContent.TabActivated
     ) -> None:
         """Al activar una pestaña, el foco va a su panel aunque llegue tarde."""
+        self._mark_active_tab()
         self.call_after_refresh(self._focus_active)
 
     def update_tab_label(self, runtime_id: str) -> None:
@@ -769,9 +822,16 @@ class MainScreen(Screen):
             content_tab = self.query_one(TabbedContent).get_tab(
                 self._pane_id(runtime_id)
             )
+            content_tab.label = f"{tab.symbol} {tab.runtime.label}"
         except (ValueError, NoMatches):
-            return
-        content_tab.label = f"{tab.symbol} {tab.runtime.label}"
+            pass
+        try:
+            self.query_one(f"#tabbtn-{runtime_id}", Button).label = (
+                f"{tab.symbol} {tab.runtime.label}"
+            )
+        except NoMatches:
+            pass
+        self._mark_active_tab()
 
     def refresh_all(self, snapshot: audit.Snapshot | None) -> None:
         if not self.is_ready:
@@ -794,6 +854,7 @@ class MainScreen(Screen):
         try:
             self.query_one("#empty-state", Static).display = empty
             self.query_one("#session-tabs", TabbedContent).display = not empty
+            self.query_one("#tabstrip", Horizontal).display = not empty
         except NoMatches:
             return
         self._update_title()
@@ -813,10 +874,15 @@ class MainScreen(Screen):
         self.app.open_new_vm()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "home":
+        button_id = event.button.id or ""
+        if button_id == "home":
             self.app.open_vm_picker()
-        elif event.button.id == "close-all":
+        elif button_id == "close-all":
             self.app.confirm_close_all()
+        elif button_id.startswith("tabbtn-"):
+            self.activate_runtime(button_id.removeprefix("tabbtn-"))
+        elif button_id.startswith("tabclose-"):
+            self.app.close_session(button_id.removeprefix("tabclose-"))
 
 
 class VmMenuScreen(ModalScreen[None]):

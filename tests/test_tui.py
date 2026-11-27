@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("textual")
 pytest.importorskip("pyte")
 
-from textual.widgets import DataTable, Input, Select  # noqa: E402
+from textual.widgets import DataTable, Input, Select, Tabs  # noqa: E402
 
 import vvm.tui.app as tui_app  # noqa: E402
 from vvm import cli, host_check, profiles, vm  # noqa: E402
@@ -1268,6 +1268,71 @@ def test_la_pista_de_teclas_no_repite_el_footer_y_se_oculta_al_capturar(
                 app._refresh_sessions()
                 await pilot.pause()
                 assert pista.display is True
+
+                await _close_active_and_wait(pilot, app)
+                await _quit_profiles(pilot, app)
+
+        asyncio.run(run())
+    finally:
+        _kill_marked_children(marker)
+
+def test_cada_pestana_tiene_su_x_y_cierra_solo_esa_vm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    monkeypatch.setattr(tui_app.VvmApp, "CONSOLE_FPS", 0)
+    marker = tmp_path / "qemu.pid"
+    qemu = _looping_qemu(tmp_path, marker)
+    app = VvmApp(
+        profiles_path=_two_profiles_file(tmp_path),
+        qemu=str(qemu),
+        refresh_interval=0.2,
+    )
+    try:
+
+        async def run() -> None:
+            async with _running_app(app, (110, 40)) as pilot:
+                await pilot.pause()
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                await _start_second(pilot)
+                await _wait_sessions(pilot, app, 2)
+
+                # la tira propia sustituye a la barra de pestañas de Textual
+                assert app.main_screen.query_one(Tabs).display is False
+                for runtime_id in app.sessions:
+                    assert app.main_screen.query_one(f"#tabbtn-{runtime_id}")
+                    assert app.main_screen.query_one(f"#tabclose-{runtime_id}")
+                # la cabecera ya no repite el símbolo de estado
+                cabecera = app.main_screen.active_tab().query_one(
+                    ".session-header"
+                ).render()
+                assert not str(cabecera).lstrip().startswith("●")
+
+                primero, segundo = list(app.sessions)
+                assert app.main_screen.active_runtime_id() == segundo
+
+                # la etiqueta activa cambia de pestaña y se marca
+                await pilot.click(f"#tabbtn-{primero}")
+                await pilot.pause()
+                assert app.main_screen.active_runtime_id() == primero
+                assert app.main_screen.query_one(
+                    f"#tabbtn-{primero}"
+                ).has_class("active-tab")
+
+                # la ✕ de la pestaña NO activa se lleva solo esa VM
+                await pilot.click(f"#tabclose-{segundo}")
+                await _wait_state(
+                    pilot,
+                    lambda: segundo not in app.sessions,
+                    "la ✕ no retiró la pestaña cerrada",
+                )
+                assert primero in app.sessions
+                await _wait_state(
+                    pilot,
+                    lambda: not app.main_screen.query(f"#tabitem-{segundo}"),
+                    "la tira se quedó con la pestaña cerrada",
+                )
+                assert app.main_screen.active_runtime_id() == primero
 
                 await _close_active_and_wait(pilot, app)
                 await _quit_profiles(pilot, app)

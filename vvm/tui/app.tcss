@@ -182,6 +182,62 @@ Footer {
     height: 1fr;
 }
 
+#session-tabs Tabs {
+    display: none;
+}
+
+#tabstrip {
+    height: 1;
+    background: $surface;
+    padding: 0 1;
+}
+
+#tabstrip .tabitem {
+    height: 1;
+    width: auto;
+    margin: 0 1 0 0;
+}
+
+#tabstrip .tabbtn {
+    width: auto;
+    min-width: 6;
+    height: 1;
+    min-height: 1;
+    border: none;
+    padding: 0 1;
+    margin: 0;
+    background: $primary-darken-3;
+    color: $text-disabled;
+}
+
+#tabstrip .tabbtn.active-tab {
+    background: $primary-lighten-1;
+    color: $text;
+    text-style: bold;
+}
+
+#tabstrip .tabclose.active-tab {
+    background: $primary-lighten-1;
+    color: $text;
+}
+
+#tabstrip .tabclose {
+    width: 3;
+    min-width: 3;
+    height: 1;
+    min-height: 1;
+    border: none;
+    padding: 0;
+    margin: 0;
+    background: $primary-darken-3;
+    color: $text-disabled;
+}
+
+#tabstrip .tabclose:hover {
+    background: $error;
+    color: $text;
+}
+
 SessionTab {
     height: 1fr;
 }
