@@ -27,7 +27,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from vvm import __version__, audit, host_check, images, profiles, session, vm
+from vvm import __version__, audit, host_check, images, profiles, session, supervisor, vm
 from vvm.host_check import CheckResult
 
 # `vvm check` no arranca nada: estos nombres solo rellenan la línea que P7 y P9
@@ -48,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"vvm {__version__}")
     subparsers = parser.add_subparsers(
-        dest="command", metavar="{check,run,audit,profiles,tui}"
+        dest="command", metavar="{check,run,audit,ps,profiles,tui}"
     )
 
     check = subparsers.add_parser("check", help="pre-chequeo P1-P10 del anfitrión")
@@ -90,11 +90,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="arranca aunque haya fallos bloqueantes",
     )
 
-    audit_parser = subparsers.add_parser("audit", help="informe de la última sesión")
+    audit_parser = subparsers.add_parser("audit", help="informe de una sesión")
+    audit_parser.add_argument(
+        "session_id",
+        nargs="?",
+        metavar="ID",
+        help="sesión guardada por id (por defecto, la última cerrada)",
+    )
     audit_parser.add_argument(
         "--session",
         metavar="RUTA",
         help="sesión guardada (por defecto, la última de $XDG_STATE_HOME)",
+    )
+
+    ps_parser = subparsers.add_parser(
+        "ps", help="lista las sesiones VVM vivas"
+    )
+    ps_parser.add_argument(
+        "--json", action="store_true", help="salida legible por máquina"
     )
 
     profiles_parser = subparsers.add_parser(
@@ -344,7 +357,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 def _emit_report(report: str, report_path: str | None) -> None:
     """Imprime el informe o lo escribe en disco, sin perderlo si falla la escritura."""
     if not report_path:
-        print(report)
+        sys.stdout.write(report)
         return
     path = Path(report_path)
     try:
@@ -355,7 +368,7 @@ def _emit_report(report: str, report_path: str | None) -> None:
             f"Error: no se pudo escribir el informe en {report_path}: {exc}",
             file=sys.stderr,
         )
-        print(report)
+        sys.stdout.write(report)
     else:
         print(f"Informe escrito en {report_path}")
 
@@ -550,14 +563,82 @@ def cmd_run(args: argparse.Namespace) -> int:
     return exit_code
 
 
-def cmd_audit(args: argparse.Namespace) -> int:
-    path = Path(args.session) if args.session else audit.default_session_path()
-    if not path.exists():
+def cmd_ps(args: argparse.Namespace) -> int:
+    """Lista el registro de sesiones vivas; nunca arranca ni consulta QEMU."""
+    entries = supervisor.list_live(
+        on_warning=lambda message: print(f"Aviso: {message}", file=sys.stderr)
+    )
+    if args.json:
         print(
-            f"No hay sesión que auditar en {path}. Ejecuta primero `vvm run`.",
+            json.dumps(
+                [entry.to_dict() for entry in entries],
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if not entries:
+        print("no hay sesiones vivas")
+        return 0
+
+    print(
+        f"{'ID':<22} {'PERFIL':<18} {'PID':>7} {'RAM':>6} "
+        f"{'DISCO':>6} {'ESTADO':<8} {'CONSOLA':<8}"
+    )
+    for entry in entries:
+        print(
+            f"{entry.id:<22} {entry.label:<18} {entry.pid:>7} "
+            f"{entry.mem_mb:>5}M {entry.disk_mb:>5}M "
+            f"{'viva':<8} {entry.serial:<8}"
+        )
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    if args.session and args.session_id:
+        print(
+            "Error: usa un id o --session, no los dos a la vez.",
             file=sys.stderr,
         )
-        return 1
+        return 2
+
+    if args.session_id:
+        try:
+            path = audit.session_path_for(args.session_id)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+        if not path.exists():
+            print(
+                f"Error: no existe la sesión {args.session_id!r} en {path}.",
+                file=sys.stderr,
+            )
+            try:
+                saved = audit.list_saved_sessions()
+            except RuntimeError as exc:
+                print(f"Aviso: {exc}", file=sys.stderr)
+                saved = ()
+            if saved:
+                print(f"Sesiones guardadas: {', '.join(saved)}", file=sys.stderr)
+            else:
+                print(
+                    f"No hay sesiones guardadas en {audit.sessions_dir()}.",
+                    file=sys.stderr,
+                )
+            return 2
+    else:
+        path = (
+            Path(args.session)
+            if args.session
+            else audit.default_session_path()
+        )
+        if not path.exists():
+            print(
+                f"No hay sesión que auditar en {path}. Ejecuta primero `vvm run`.",
+                file=sys.stderr,
+            )
+            return 1
     try:
         session = audit.load_session_full(path)
     except (OSError, RuntimeError, ValueError) as exc:
@@ -566,6 +647,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
     report = audit.build_report(
         session.before,
         session.after,
+        session.extras.log_path,
         checks=session.checks,
         forced=session.forced,
         extras=session.extras,
@@ -656,6 +738,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_run(args)
     if args.command == "audit":
         return cmd_audit(args)
+    if args.command == "ps":
+        return cmd_ps(args)
     if args.command == "profiles":
         return cmd_profiles(args)
     if args.command == "tui":

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,6 +82,13 @@ class SessionExtras:
     # `None` = sesión antigua que no midió el disco; `0` = sin disco de datos.
     disk_mb: int | None = None
     process_io: ProcessIO | None = None
+    # Ruta y tamaño del log serie con el que se compuso el informe, para que
+    # `audit` pueda reconstruirlo byte a byte.
+    log_path: str | None = None
+    log_size: int | None = None
+    # Otras VMs vivas cuando arrancó esta: su actividad entra en el delta global
+    # de Shmem. `0` mantiene el informe byte a byte igual que antes.
+    other_sessions: int = 0
 
 
 @dataclass(frozen=True)
@@ -124,6 +132,30 @@ def list_shm_entries(shm_dir: Path = SHM_PATH) -> tuple[str, ...]:
         raise RuntimeError(f"No se pudo listar {shm_dir}: {exc}") from exc
 
 
+def _memfd_names_for_pid(proc_pid: Path) -> set[str]:
+    """Nombres `memfd:*` abiertos por un proceso concreto."""
+    names: set[str] = set()
+    try:
+        with os.scandir(proc_pid / "fd") as fds:
+            for fd_entry in fds:
+                try:
+                    target = os.readlink(fd_entry.path)
+                except OSError:
+                    continue
+                if not target.startswith(_MEMFD_PREFIX):
+                    continue
+                raw = target[len(_MEMFD_PREFIX):]
+                names.add("memfd:" + raw.split(" (deleted)", 1)[0])
+    except OSError:
+        return names
+    return names
+
+
+def memfd_names_of(pid: int, proc_dir: Path = PROC_PATH) -> tuple[str, ...]:
+    """`memfd:*` abiertos por un PID concreto; vacío si no se puede leer."""
+    return tuple(sorted(_memfd_names_for_pid(Path(proc_dir) / str(pid))))
+
+
 def list_memfd_names(proc_dir: Path = PROC_PATH) -> tuple[str, ...]:
     """Nombres `memfd:*` visibles en los descriptores abiertos de `/proc`.
 
@@ -138,19 +170,7 @@ def list_memfd_names(proc_dir: Path = PROC_PATH) -> tuple[str, ...]:
             for entry in entries:
                 if not entry.name.isdigit():
                     continue
-                try:
-                    with os.scandir(Path(entry.path) / "fd") as fds:
-                        for fd_entry in fds:
-                            try:
-                                target = os.readlink(fd_entry.path)
-                            except OSError:
-                                continue
-                            if not target.startswith(_MEMFD_PREFIX):
-                                continue
-                            raw = target[len(_MEMFD_PREFIX):]
-                            names.add("memfd:" + raw.split(" (deleted)", 1)[0])
-                except OSError:
-                    continue
+                names.update(_memfd_names_for_pid(Path(entry.path)))
     except OSError as exc:
         raise RuntimeError(f"No se pudo listar {proc_dir}: {exc}") from exc
     return tuple(sorted(names))
@@ -169,6 +189,11 @@ def live_qemu_pids(proc_dir: Path = PROC_PATH) -> tuple[str, ...]:
     except OSError as exc:
         raise RuntimeError(f"No se pudo listar {proc_dir}: {exc}") from exc
     return tuple(sorted(pids, key=_pid_sort_key))
+
+
+def is_vvm_qemu(pid: int, proc_dir: Path = PROC_PATH) -> bool:
+    """True si el PID es un `qemu-system-*` con el marcador de sesión VVM."""
+    return _is_session_qemu(Path(proc_dir) / str(pid))
 
 
 def _is_session_qemu(proc_pid: Path) -> bool:
@@ -274,6 +299,8 @@ def build_report(
     resultado de `--wipe`.
     """
     details = extras if extras is not None else SessionExtras()
+    if log_path is None:
+        log_path = details.log_path
     new_entries = sorted(set(after.shm_entries) - set(before.shm_entries))
     # Sin línea base de memfds (sesión antigua) no se puede atribuir nada: ni
     # «ninguno» (sería un falso negativo) ni un hallazgo.
@@ -351,6 +378,15 @@ def build_report(
             after.mem_available_kb,
             _delta(before.mem_available_kb, after.mem_available_kb),
         ),
+        *(
+            [
+                "   Otras sesiones vivas: "
+                f"{details.other_sessions} "
+                "(su actividad entra en el delta de Shmem)"
+            ]
+            if details.other_sessions > 0
+            else []
+        ),
         "   Aviso: Shmem es un contador global del anfitrión (todo tmpfs, /dev/shm incluido)",
         "   y con un escritorio abierto tiene cientos de MB de ruido. Sin una línea base",
         "   limpia no se le puede atribuir al guest ninguna variación.",
@@ -359,7 +395,7 @@ def build_report(
         *_process_io_lines(details.process_io, details.image_mode, details.disk_mb),
         "",
         "5. Log serie",
-        *_log_lines(log_path),
+        *_log_lines(log_path, details.log_size),
         "",
         "6. Cierre y borrado",
         f"   Cierre: {details.closure or 'desconocido'}",
@@ -489,25 +525,68 @@ def _teardown_lines(extras: SessionExtras) -> list[str]:
     return lines
 
 
-def _log_lines(log_path: str | None) -> list[str]:
+def _log_lines(log_path: str | None, size: int | None = None) -> list[str]:
     if not log_path:
         return ["   Log serie: ninguno"]
     path = Path(log_path)
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return [f"   Log serie: ninguno (no existe {path})"]
+    if size is None:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return [f"   Log serie: ninguno (no existe {path})"]
     return [
         f"   Log serie: {path} ({size} bytes)",
         "   es un rastro en disco: bórralo o guárdalo aparte",
     ]
 
 
+def _state_home() -> Path:
+    """Base de estado XDG (`~/.local/state` si no hay variable)."""
+    state_home = os.environ.get("XDG_STATE_HOME", "")
+    return Path(state_home) if state_home else Path.home() / ".local" / "state"
+
+
 def default_session_path() -> Path:
     """Ruta por defecto de la última sesión: `$XDG_STATE_HOME/vvm/last-session.json`."""
-    state_home = os.environ.get("XDG_STATE_HOME", "")
-    base = Path(state_home) if state_home else Path.home() / ".local" / "state"
-    return base / "vvm" / "last-session.json"
+    return _state_home() / "vvm" / "last-session.json"
+
+
+def sessions_dir() -> Path:
+    """Directorio de las sesiones guardadas por id."""
+    return _state_home() / "vvm" / "sessions"
+
+
+def session_path_for(session_id: str) -> Path:
+    """Ruta del JSON de una sesión concreta, sin permitir rutas relativas."""
+    if (
+        not session_id
+        or "\0" in session_id
+        or session_id in {".", ".."}
+        or "/" in session_id
+        or os.sep in session_id
+        or (os.altsep and os.altsep in session_id)
+    ):
+        raise ValueError(f"id de sesión no válido: {session_id!r}")
+    return sessions_dir() / f"{session_id}.json"
+
+
+def list_saved_sessions() -> tuple[str, ...]:
+    """Ids de las sesiones guardadas, ordenados; vacío si no hay ninguna."""
+    directory = sessions_dir()
+    try:
+        with os.scandir(directory) as entries:
+            names = [
+                Path(entry.name).stem
+                for entry in entries
+                if entry.is_file() and entry.name.endswith(".json")
+            ]
+    except FileNotFoundError:
+        return ()
+    except OSError as exc:
+        raise RuntimeError(
+            f"No se pudo listar el directorio de sesiones {directory}: {exc}"
+        ) from exc
+    return tuple(sorted(names))
 
 
 def save_session(
@@ -529,10 +608,21 @@ def save_session(
         document["checks"] = [asdict(check) for check in checks]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(document, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        handle, temporary = tempfile.mkstemp(
+            prefix=path.name + ".", suffix=".tmp", dir=path.parent
         )
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+                )
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
     except OSError as exc:
         raise RuntimeError(f"No se pudo guardar la sesión en {path}: {exc}") from exc
 
@@ -617,6 +707,9 @@ def _extras_to_dict(extras: SessionExtras) -> dict[str, object]:
             asdict(extras.process_io) if extras.process_io is not None else None
         ),
         "wipe": asdict(extras.wipe) if extras.wipe is not None else None,
+        "log_path": extras.log_path,
+        "log_size": extras.log_size,
+        "other_sessions": extras.other_sessions,
     }
 
 
@@ -653,6 +746,32 @@ def _extras_from_dict(raw: object, path: Path) -> SessionExtras:
             f"El campo 'disk_mb' de la sesión {path} debe ser un entero no "
             "negativo o null."
         )
+    other_sessions = raw.get("other_sessions", 0)
+    if (
+        not isinstance(other_sessions, int)
+        or isinstance(other_sessions, bool)
+        or other_sessions < 0
+    ):
+        raise ValueError(
+            f"El campo 'other_sessions' de la sesión {path} debe ser un entero "
+            "no negativo."
+        )
+    log_path = raw.get("log_path")
+    if log_path is not None and (not isinstance(log_path, str) or not log_path):
+        raise ValueError(
+            f"El campo 'log_path' de la sesión {path} debe ser una cadena no "
+            "vacía o null."
+        )
+    log_size = raw.get("log_size")
+    if log_size is not None and (
+        not isinstance(log_size, int)
+        or isinstance(log_size, bool)
+        or log_size < 0
+    ):
+        raise ValueError(
+            f"El campo 'log_size' de la sesión {path} debe ser un entero no "
+            "negativo o null."
+        )
 
     process_io = _process_io_from_dict(raw.get("process_io"), path)
     wipe = _wipe_from_dict(raw.get("wipe"), path)
@@ -663,6 +782,9 @@ def _extras_from_dict(raw: object, path: Path) -> SessionExtras:
         image_mode=image_mode,
         disk_mb=disk_mb,
         process_io=process_io,
+        log_path=log_path,
+        log_size=log_size,
+        other_sessions=other_sessions,
     )
 
 
