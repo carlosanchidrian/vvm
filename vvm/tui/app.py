@@ -40,12 +40,16 @@ from .widgets import ConsoleView, SessionRuntime
 # Ruta simbólica del pre-chequeo: P7/P9 solo miran la forma de la línea.
 _PRECHECK_SOCKET = "<socket>"
 
+# Refresco de la consola activa: independiente de las métricas (1 s).
+CONSOLE_FPS = 10
+
 
 class VvmApp(App):
     """TUI de VVM. Las sesiones viven fuera de la interfaz y se gobiernan aquí."""
 
     CSS_PATH = "app.tcss"
     TITLE = "VVM — Volatile Virtual Machines"
+    CONSOLE_FPS = CONSOLE_FPS
 
     BINDINGS = [
         Binding("ctrl+g", "open_vm_menu", "Menú VM", priority=True, show=False),
@@ -103,6 +107,7 @@ class VvmApp(App):
                 severity="warning",
             )
         self.set_interval(self.refresh_interval, self._refresh_sessions)
+        self.set_interval(1 / self.CONSOLE_FPS, self._refresh_console)
         self.set_interval(0.2, self._poll_group_signal)
 
 
@@ -320,6 +325,19 @@ class VvmApp(App):
                     runtime, wipe=runtime.wipe, stop=False, remove=False
                 )
 
+    def _refresh_console(self) -> None:
+        """Repinta solo la consola activa, sin snapshot ni lecturas de /proc."""
+        main = self.main_screen
+        if (
+            main is None
+            or not main.is_ready
+            or main not in self.screen_stack
+        ):
+            return
+        tab = main.active_tab()
+        if tab is not None:
+            tab.refresh_console()
+
     def _poll_group_signal(self) -> None:
         if self.group.stop_signal is None or self._signal_closing:
             return
@@ -488,7 +506,12 @@ class VvmApp(App):
 
     def send_ctrl_c(self, runtime_id: str) -> None:
         runtime = self.sessions.get(runtime_id)
-        if runtime is not None:
+        if runtime is None:
+            return
+        tab = self._tab(runtime)
+        if tab is not None:
+            tab.send_ctrl_c()
+        else:
             runtime.console.send(b"\x03")
 
     def action_guest_ctrl_c(self) -> None:

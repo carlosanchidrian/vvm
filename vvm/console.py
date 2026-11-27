@@ -8,6 +8,7 @@ entrega una instantánea con estilos. La UI solo pinta y traduce teclas.
 from __future__ import annotations
 
 import codecs
+import errno
 import select
 import socket
 import sys
@@ -181,6 +182,7 @@ class SerialConsole:
         self._stop = threading.Event()
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._socket: socket.socket | None = None
+        self._out_buffer = bytearray()
         self._bytes_received = 0
         self._thread = threading.Thread(
             target=self._reader,
@@ -291,19 +293,41 @@ class SerialConsole:
     # -- escritura --------------------------------------------------------
 
     def send(self, data: bytes) -> bool:
-        """Envía bytes si hay conexión; `False` si el socket ya no está."""
+        """Encola y envía sin bloquear; conserva lo pendiente si el socket llena."""
         if not data:
             return True
         with self._lock:
             sock = self._socket
-        if sock is None:
-            return False
-        try:
-            sock.sendall(data)
-            return True
-        except OSError:
-            self._drop_socket()
-            return False
+            if sock is None:
+                return False
+            self._out_buffer.extend(data)
+        return self._flush_socket(sock)
+
+    def _flush_socket(self, sock: socket.socket) -> bool:
+        """Vacía lo pendiente con `send` no bloqueante, sin cortar por EAGAIN."""
+        with self._lock:
+            if self._socket is not sock:
+                return False
+            while self._out_buffer:
+                try:
+                    sent = sock.send(self._out_buffer)
+                except BlockingIOError:
+                    break
+                except InterruptedError:
+                    continue
+                except OSError as exc:
+                    if exc.errno in (
+                        errno.ECONNRESET,
+                        errno.EPIPE,
+                        errno.ENOTCONN,
+                    ):
+                        self._drop_socket()
+                        return False
+                    break
+                if sent <= 0:
+                    break
+                del self._out_buffer[:sent]
+            return self._socket is not None
 
     # -- ciclo del hilo ---------------------------------------------------
 
@@ -323,6 +347,7 @@ class SerialConsole:
         with self._lock:
             sock = self._socket
             self._socket = None
+            self._out_buffer.clear()
         if sock is not None:
             try:
                 sock.close()
@@ -349,9 +374,18 @@ class SerialConsole:
         decoder: codecs.IncrementalDecoder,
     ) -> None:
         while not self._stop.is_set():
+            with self._lock:
+                want_write = bool(self._out_buffer)
             try:
-                readable, _, _ = select.select([sock], [], [], RETRY_SECONDS)
+                readable, writable, _ = select.select(
+                    [sock],
+                    [sock] if want_write else [],
+                    [],
+                    RETRY_SECONDS,
+                )
             except (OSError, ValueError):
+                return
+            if writable and not self._flush_socket(sock):
                 return
             if not readable:
                 continue

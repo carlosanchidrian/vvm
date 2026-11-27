@@ -240,12 +240,18 @@ class ConsoleView(Static):
     def refresh_view(self) -> None:
         self.refresh()
 
+    def send(self, data: bytes) -> bool:
+        """Envía al guest y repinta ya, sin esperar al timer de la consola."""
+        sent = self.console.send(data)
+        self.refresh_view()
+        return sent
+
     def on_key(self, event) -> None:
         if not self.capture:
             return
         data = key_to_bytes(event.key, getattr(event, "character", None))
         if data:
-            self.console.send(data)
+            self.send(data)
         event.stop()
         event.prevent_default()
 
@@ -274,6 +280,7 @@ class SessionTab(Vertical):
         self._report_view.display = False
         self.query_one(SessionPanel).focus()
         self.refresh_view(None)
+        self.refresh_console()
 
     # -- estado -----------------------------------------------------------
 
@@ -356,8 +363,6 @@ class SessionTab(Vertical):
             self._report_view.update(self.runtime.report)
             self._report_view.display = True
             self._console_view().display = False
-        else:
-            self._console_view().refresh_view()
 
     def _other_sessions(self) -> int:
         app = self.app
@@ -372,6 +377,17 @@ class SessionTab(Vertical):
 
     def _console_view(self) -> ConsoleView:
         return self.query_one(ConsoleView)
+
+    def refresh_console(self) -> None:
+        if self.runtime.report is not None:
+            return
+        try:
+            self._console_view().refresh_view()
+        except NoMatches:
+            return
+
+    def send_ctrl_c(self) -> None:
+        self._console_view().send(b"\x03")
 
     def mark_finishing(self) -> None:
         self.runtime.finishing = True

@@ -544,9 +544,17 @@ class MainScreen(Screen):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
+            yield Button(
+                "●",
+                id="home",
+                tooltip="Menú de VMs",
+            )
             yield Static("VVM · 0 VMs", id="topbar-title")
             yield Button(
-                "Cerrar todo + wipe", id="close-all", variant="error"
+                "✕",
+                id="close-all",
+                variant="error",
+                tooltip="Cerrar todo + wipe",
             )
         yield Static("sin VMs · n abre perfiles", id="empty-state")
         yield TabbedContent(id="session-tabs")
@@ -600,6 +608,10 @@ class MainScreen(Screen):
 
     def tab_for(self, runtime_id: str) -> SessionTab | None:
         return self.tabs_by_id.get(runtime_id)
+
+    def active_tab(self) -> SessionTab | None:
+        runtime_id = self.active_runtime_id()
+        return self.tabs_by_id.get(runtime_id) if runtime_id else None
 
     def active_runtime_id(self) -> str | None:
         tabs = self.query_one(TabbedContent)
@@ -695,7 +707,9 @@ class MainScreen(Screen):
         self.app.open_new_vm()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "close-all":
+        if event.button.id == "home":
+            self.app.open_new_vm()
+        elif event.button.id == "close-all":
             self.app.confirm_close_all()
 
 

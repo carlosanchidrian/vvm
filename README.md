@@ -230,17 +230,22 @@ borde se pone verde. `Ctrl-G` es la única salida: abre el menú de la VM activa
 | `Ctrl-Q` | siempre | **todas** con wipe, con confirmación, y salir |
 | `enter` | panel | entrar en la consola (captura) |
 
-El cierre total tiene un botón `Cerrar todo + wipe` anclado a la derecha de la
-barra superior. Abre una confirmación que recuerda que se pondrá a cero el disco
-de cada VM: `enter` confirma, `esc` cancela y el foco inicial está en Cancelar.
+La barra superior tiene dos iconos: `●` a la izquierda (tooltip «Menú de VMs»)
+abre la lista de perfiles sin parar ninguna VM, y `✕` a la derecha (tooltip
+«Cerrar todo + wipe») abre la confirmación que recuerda que se pondrá a cero el
+disco de cada VM: `enter` confirma, `esc` cancela y el foco inicial está en
+Cancelar.
 Los cierres corren en un hilo para no congelar la pantalla. Si el cierre lo
 inicia SIGTERM, SIGHUP o SIGINT, la app sale con 128+señal. `q` en la última
 pestaña vuelve a la lista de perfiles sin cerrar la aplicación. Si hay VMs
 vivas y `q` se pulsa en perfiles, pre-chequeo o informe, se vuelve al centro de
 control; no se cierra nada sin el modal de cierre total.
 
-La app no se cierra cuando una VM termina. Un único temporizador por app toma
-una instantánea de memoria por tick y la comparte entre todas las pestañas.
+La app no se cierra cuando una VM termina. Hay dos cadencias: el temporizador
+de métricas toma una instantánea de memoria por tick y la comparte entre las
+pestañas, mientras que un temporizador de consola a 10 fps repinta solo la
+consola activa. El eco de una tecla se ve en el siguiente frame de consola
+(≤ 0,2 s), sin esperar al tick de métricas.
 
 ### `vvm audit` — informe de una sesión
 
@@ -328,5 +333,5 @@ vvm/
 ├── cli.py          # argparse: check | run | audit | ps | profiles | tui
 ├── tui/            # Textual opcional: app, pantallas, widgets y CSS
 └── __main__.py     # python3 -m vvm
-tests/              # 331 tests, sin KVM
+tests/              # 334 tests, sin KVM
 ```

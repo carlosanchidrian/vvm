@@ -137,10 +137,17 @@ Footer {
     content-align: left middle;
 }
 
+#home {
+    dock: left;
+    height: 1;
+    min-width: 3;
+    color: #3b82f6;
+}
+
 #close-all {
     dock: right;
     height: 1;
-    min-width: 24;
+    min-width: 3;
 }
 
 #empty-state {

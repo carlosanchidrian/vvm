@@ -29,6 +29,56 @@ def _text(console: SerialConsole) -> str:
     )
 
 
+class _DrainServer:
+    """Acepta la conexión, tarda en leer y luego consume todo el flujo."""
+
+    def __init__(self, path: Path, expected: int, delay: float = 0.2) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        self.path = path
+        self.expected = expected
+        self.delay = delay
+        self.received = bytearray()
+        self.done = threading.Event()
+        self.connected = threading.Event()
+        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket.bind(str(path))
+        self.socket.listen(1)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        try:
+            connection, _ = self.socket.accept()
+        except OSError:
+            return
+        self.connected.set()
+        with connection:
+            time.sleep(self.delay)
+            while len(self.received) < self.expected:
+                try:
+                    chunk = connection.recv(65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                self.received.extend(chunk)
+            self.done.set()
+
+    def close(self) -> None:
+        try:
+            self.socket.close()
+        except OSError:
+            pass
+        self.thread.join(timeout=2)
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 class _EchoServer:
     def __init__(self, path: Path) -> None:
         try:
@@ -196,6 +246,24 @@ def test_socket_entrega_utf8_partido_sin_tumbar_el_hilo(tmp_path: Path):
         server.close()
 
 
+def test_eco_visible_en_menos_de_0_2s(tmp_path: Path):
+    path = tmp_path / "serie.sock"
+    console = SerialConsole(path)
+    server = _EchoServer(path)
+    try:
+        _wait(lambda: console.connected)
+        started = time.monotonic()
+        assert console.send(b"a")
+        while "a" not in _text(console):
+            if time.monotonic() - started > 0.2:
+                raise AssertionError("el eco tardó más de 0,2 s")
+            time.sleep(0.01)
+        assert time.monotonic() - started <= 0.2
+    finally:
+        console.stop()
+        server.close()
+
+
 def test_socket_eco_y_stop_une_el_hilo(tmp_path: Path):
     path = tmp_path / "serie.sock"
     baseline = threading.active_count()
@@ -238,6 +306,24 @@ def test_reconecta_tras_cerrar_el_servidor(tmp_path: Path):
         first.close()
         if second is not None:
             second.close()
+
+
+def test_envio_grande_no_bloqueante_conserva_los_bytes(tmp_path: Path):
+    payload = b"x" * (1024 * 1024)
+    path = tmp_path / "serie.sock"
+    server = _DrainServer(path, len(payload))
+    console = SerialConsole(path)
+    try:
+        _wait(lambda: console.connected)
+        assert server.connected.wait(2)
+        assert console.send(payload) is True
+        time.sleep(0.1)
+        assert console.connected is True
+        assert server.done.wait(5)
+        assert bytes(server.received) == payload
+    finally:
+        console.stop()
+        server.close()
 
 
 def test_send_sin_conexion_devuelve_false(tmp_path: Path):

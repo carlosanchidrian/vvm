@@ -725,11 +725,94 @@ def test_sigterm_cierra_todas_las_vms_y_sale_con_143(
         _kill_marked_children(marker)
 
 
+def test_home_y_cierre_total_en_la_barra_superior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    marker = tmp_path / "qemu.pid"
+    qemu = _looping_qemu(tmp_path, marker)
+    app = VvmApp(
+        profiles_path=_two_profiles_file(tmp_path),
+        qemu=str(qemu),
+        refresh_interval=0.2,
+    )
+    try:
+
+        async def run() -> None:
+            async with _running_app(app, (110, 40)) as pilot:
+                await pilot.pause()
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                await _start_second(pilot)
+                await _wait_sessions(pilot, app, 2)
+                _wait_lines(marker, 2)
+                sessions = [runtime.session for runtime in app.sessions.values()]
+
+                texto = app.export_text()
+                assert "✕" in texto
+                assert "●" in texto
+
+                await pilot.click("#home")
+                await _wait_state(
+                    pilot,
+                    lambda: isinstance(app.screen, ProfilesScreen),
+                    "home no abrió la lista de perfiles",
+                )
+                assert len(app.sessions) == 2
+                assert all(session.running for session in sessions)
+                for runtime_id in app.sessions:
+                    assert app.main_screen.tab_for(runtime_id).symbol == "●"
+
+                await pilot.press("escape")
+                await _wait_state(
+                    pilot,
+                    lambda: isinstance(app.screen, MainScreen),
+                    "escape no volvió al centro de control",
+                )
+                assert all(session.running for session in sessions)
+
+                await pilot.click("#close-all")
+                await _wait_state(
+                    pilot,
+                    lambda: isinstance(app.screen, CloseAllScreen),
+                    "el botón de cierre no abrió la confirmación",
+                )
+                assert all(session.running for session in sessions)
+
+                await pilot.press("escape")
+                await _wait_state(
+                    pilot,
+                    lambda: isinstance(app.screen, MainScreen),
+                    "escape no canceló el cierre total",
+                )
+                assert all(session.running for session in sessions)
+
+                await pilot.press("ctrl+q")
+                await _wait_state(
+                    pilot,
+                    lambda: isinstance(app.screen, CloseAllScreen),
+                    "Ctrl-Q no abrió la confirmación",
+                )
+                await pilot.press("enter")
+                await _wait_state(
+                    pilot,
+                    lambda: app.return_code is not None,
+                    "el cierre total no terminó",
+                )
+
+        asyncio.run(run())
+    finally:
+        _kill_marked_children(marker)
+
+
 def test_el_boton_de_cierre_total_esta_anclado_a_la_derecha():
     css = (ROOT / "vvm" / "tui" / "app.tcss").read_text(encoding="utf-8")
     assert "#close-all {" in css
     block = css.split("#close-all {", 1)[1].split("}", 1)[0]
     assert "dock: right" in block
+    assert "#home {" in css
+    home = css.split("#home {", 1)[1].split("}", 1)[0]
+    assert "dock: left" in home
+    assert "#3b82f6" in home
 
 
 def test_tui_sin_tty_sale_2(
