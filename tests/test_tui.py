@@ -77,6 +77,9 @@ class _FakeConsole:
 @pytest.fixture(autouse=True)
 def fake_console(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(tui_app, "SerialConsole", _FakeConsole)
+    # La latencia de la consola se prueba en test_console; aquí no hace falta
+    # un repintado a 10 fps y solo añade ruido al bucle de mensajes.
+    monkeypatch.setattr(tui_app.VvmApp, "CONSOLE_FPS", 0)
 
 
 def _boot(tmp_path: Path) -> tuple[Path, Path]:
@@ -148,7 +151,7 @@ def _looping_qemu(tmp_path: Path, marker: Path) -> Path:
 
 
 def _app(tmp_path: Path, qemu: str = "/bin/true", **kwargs) -> VvmApp:
-    kwargs.setdefault("refresh_interval", 0.1)
+    kwargs.setdefault("refresh_interval", 1.0)
     return VvmApp(
         profiles_path=_profiles_file(tmp_path),
         qemu=qemu,
@@ -234,6 +237,10 @@ async def _wait_finished(pilot, app: VvmApp, runtime_id: str, timeout: float = 5
         if time.monotonic() > deadline:
             raise AssertionError(f"la VM {runtime_id} no terminó")
         await pilot.pause(0.05)
+    while app.workers:
+        if time.monotonic() > deadline:
+            raise AssertionError("quedaron workers de cierre")
+        await asyncio.sleep(0.02)
 
 
 async def _wait_tab(pilot, app: VvmApp, runtime_id: str, timeout: float = 5.0):
@@ -250,6 +257,11 @@ async def _wait_tab(pilot, app: VvmApp, runtime_id: str, timeout: float = 5.0):
 async def _quit_profiles(pilot, app: VvmApp) -> None:
     if isinstance(app.screen, ProfilesScreen) and app.return_code is None:
         await pilot.press("q")
+        deadline = time.monotonic() + 5
+        while app.workers:
+            if time.monotonic() > deadline:
+                raise AssertionError("quedaron workers al salir")
+            await asyncio.sleep(0.02)
         await pilot.pause(0.3)
 
 
@@ -284,6 +296,11 @@ async def _close_active_and_wait(pilot, app: VvmApp, timeout: float = 8.0) -> No
     await pilot.pause()
     await pilot.press("q")
     await pilot.pause(1.0)
+    deadline = time.monotonic() + timeout
+    while app.workers:
+        if time.monotonic() > deadline:
+            raise AssertionError("quedaron workers de cierre")
+        await asyncio.sleep(0.02)
 
 
 async def _start_first(pilot) -> None:

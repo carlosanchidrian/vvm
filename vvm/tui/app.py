@@ -107,7 +107,8 @@ class VvmApp(App):
                 severity="warning",
             )
         self.set_interval(self.refresh_interval, self._refresh_sessions)
-        self.set_interval(1 / self.CONSOLE_FPS, self._refresh_console)
+        if self.CONSOLE_FPS > 0:
+            self.set_interval(1 / self.CONSOLE_FPS, self._refresh_console)
         self.set_interval(0.2, self._poll_group_signal)
 
 
