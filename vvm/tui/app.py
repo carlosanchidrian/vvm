@@ -29,8 +29,10 @@ from .screens import (
     CloseAllScreen,
     DeleteProfileScreen,
     MainScreen,
+    PickedProfile,
     PreCheckScreen,
     ProfileFormScreen,
+    ProfilePickerScreen,
     ProfilesScreen,
     ReportScreen,
     VmMenuScreen,
@@ -662,6 +664,33 @@ class VvmApp(App):
                 selected=self.requested_profile or self.profiles_file.default,
             )
         )
+
+    def open_vm_picker(self) -> None:
+        """Selector en superposición: arrancar otra VM sin perder las pestañas."""
+        if self.profiles_file is None:
+            return
+        self.push_screen(
+            ProfilePickerScreen(
+                self.profiles_file,
+                selected=self.requested_profile or self.profiles_file.default,
+                running=len(self.sessions),
+            ),
+            self._on_profile_picked,
+        )
+
+    def _on_profile_picked(self, result: PickedProfile | None) -> None:
+        if result is None:
+            return
+        if result.manage or not result.name or self.profiles_file is None:
+            self.open_new_vm()
+            return
+        profile = self.profiles_file.profiles.get(result.name)
+        if profile is None:
+            self.notify(
+                f"El perfil {result.name} ya no existe", severity="warning"
+            )
+            return
+        self.open_precheck(profile, check_only=False)
 
     # -- informes ---------------------------------------------------------
 

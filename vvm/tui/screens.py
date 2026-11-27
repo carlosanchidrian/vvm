@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -47,6 +48,27 @@ def _warnings(results: Sequence[CheckResult]) -> list[CheckResult]:
     return [result for result in results if result.status != "OK"]
 
 
+def fill_profile_table(table: DataTable, profiles_file: profiles.Profiles) -> list[str]:
+    """Rellena la tabla de perfiles y devuelve los nombres en el orden de filas.
+
+    La usan la pantalla completa de perfiles y el selector en superposición, para
+    que las dos enseñen exactamente las mismas columnas y el mismo orden.
+    """
+    names = sorted(profiles_file.profiles)
+    table.add_columns("NOMBRE", "FUENTE", "RAM", "DISCO", "WIPE")
+    for name in names:
+        profile = profiles_file.profiles[name]
+        table.add_row(
+            profile.name,
+            profile.source,
+            f"{profile.mem_mb} MB",
+            f"{profile.disk_mb} MB",
+            "sí" if profile.wipe else "no",
+            key=name,
+        )
+    return names
+
+
 class ProfilesScreen(Screen):
     """Lista de perfiles con la fuente, RAM, disco y wipe de cada uno."""
 
@@ -83,17 +105,7 @@ class ProfilesScreen(Screen):
 
     def on_mount(self) -> None:
         table = self.query_one("#profile-table", DataTable)
-        table.add_columns("NOMBRE", "FUENTE", "RAM", "DISCO", "WIPE")
-        for name in self.names:
-            profile = self.profiles_file.profiles[name]
-            table.add_row(
-                profile.name,
-                profile.source,
-                f"{profile.mem_mb} MB",
-                f"{profile.disk_mb} MB",
-                "sí" if profile.wipe else "no",
-                key=name,
-            )
+        self.names = fill_profile_table(table, self.profiles_file)
         if self.selected in self.names:
             table.move_cursor(row=self.names.index(self.selected))
         if self.names:
@@ -418,6 +430,96 @@ class DeleteProfileScreen(Screen):
             self.action_cancel()
 
 
+@dataclass(frozen=True)
+class PickedProfile:
+    """Resultado del selector: arrancar un perfil o ir a gestionarlos."""
+
+    name: str | None = None
+    manage: bool = False
+
+
+class ProfilePickerScreen(ModalScreen["PickedProfile | None"]):
+    """Selector de perfil en superposición: las pestañas siguen a la vista.
+
+    Es el botón «casa» de la barra superior. Arranca otra VM sin salir del centro
+    de control, así que las sesiones vivas no desaparecen de la pantalla.
+    """
+
+    BINDINGS = [
+        ("enter", "pick", "Arrancar"),
+        ("p", "manage", "Gestionar perfiles"),
+        ("escape", "cancel", "Volver"),
+        ("q", "cancel", "Volver"),
+    ]
+
+    def __init__(
+        self,
+        profiles_file: profiles.Profiles,
+        *,
+        selected: str | None = None,
+        running: int = 0,
+    ) -> None:
+        super().__init__()
+        self.profiles_file = profiles_file
+        self.selected = selected
+        self.running = running
+        self.names: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="picker-box"):
+            yield Static("Arrancar una VM", id="picker-title")
+            yield Static(
+                f"{self.running} VM(s) en marcha, siguen a la vista"
+                if self.running
+                else "No hay VMs vivas",
+                id="picker-sub",
+            )
+            yield DataTable(id="picker-table", cursor_type="row", zebra_stripes=True)
+            yield Static(
+                "enter: arrancar · p: gestionar perfiles · esc: volver",
+                id="picker-hint",
+            )
+
+    def on_mount(self) -> None:
+        table = self.query_one("#picker-table", DataTable)
+        self.names = fill_profile_table(table, self.profiles_file)
+        if self.selected in self.names:
+            table.move_cursor(row=self.names.index(self.selected))
+        if self.names:
+            table.focus()
+
+    def _current_name(self) -> str | None:
+        if not self.names:
+            return None
+        table = self.query_one("#picker-table", DataTable)
+        row = table.cursor_row
+        if row is None or not (0 <= row < len(self.names)):
+            return None
+        return self.names[row]
+
+    def action_pick(self) -> None:
+        name = self._current_name()
+        if name is None:
+            self.app.notify("No hay ningún perfil seleccionado", severity="warning")
+            return
+        self.dismiss(PickedProfile(name=name))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """`enter` sobre la tabla lo consume DataTable: arrancar desde su evento."""
+        event.stop()
+        name = str(event.row_key.value) if event.row_key.value else None
+        if name:
+            self.dismiss(PickedProfile(name=name))
+        else:  # pragma: no cover - la tabla siempre lleva key=nombre
+            self.action_pick()
+
+    def action_manage(self) -> None:
+        self.dismiss(PickedProfile(manage=True))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class PreCheckScreen(Screen):
     """P1-P10 del perfil, con la opción de seguir o forzar."""
 
@@ -535,6 +637,7 @@ class MainScreen(Screen):
     BINDINGS = [
         ("q", "close_active", "Cerrar VM"),
         ("n", "new_vm", "Nueva VM"),
+        ("p", "manage_profiles", "Perfiles"),
     ]
 
     def __init__(self) -> None:
@@ -545,9 +648,9 @@ class MainScreen(Screen):
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
             yield Button(
-                "●",
+                "⌂",
                 id="home",
-                tooltip="Menú de VMs",
+                tooltip="Menú de VMs (perfiles)",
             )
             yield Static("VVM · 0 VMs", id="topbar-title")
             yield Button(
@@ -704,11 +807,14 @@ class MainScreen(Screen):
         self.app.close_session(runtime_id)
 
     def action_new_vm(self) -> None:
+        self.app.open_vm_picker()
+
+    def action_manage_profiles(self) -> None:
         self.app.open_new_vm()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "home":
-            self.app.open_new_vm()
+            self.app.open_vm_picker()
         elif event.button.id == "close-all":
             self.app.confirm_close_all()
 
@@ -750,7 +856,7 @@ class VmMenuScreen(ModalScreen[None]):
 
     def action_new_vm(self) -> None:
         self.dismiss(None)
-        self.app.open_new_vm()
+        self.app.open_vm_picker()
 
     def action_stop_vm(self) -> None:
         self.dismiss(None)

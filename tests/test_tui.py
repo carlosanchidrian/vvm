@@ -16,13 +16,14 @@ import pytest
 pytest.importorskip("textual")
 pytest.importorskip("pyte")
 
-from textual.widgets import Input, Select  # noqa: E402
+from textual.widgets import DataTable, Input, Select  # noqa: E402
 
 import vvm.tui.app as tui_app  # noqa: E402
 from vvm import cli, host_check, profiles, vm  # noqa: E402
 from vvm.console import ConsoleSnapshot, Span  # noqa: E402
 from vvm.tui.app import VvmApp  # noqa: E402
-from vvm.tui.screens import (  # noqa: E402
+from vvm.tui.screens import (
+    ProfilePickerScreen,  # noqa: E402
     CloseAllScreen,
     DeleteProfileScreen,
     MainScreen,
@@ -314,7 +315,7 @@ async def _start_first(pilot) -> None:
 async def _start_second(pilot) -> None:
     await pilot.press("n")
     await pilot.pause()
-    assert isinstance(pilot.app.screen, ProfilesScreen)
+    assert isinstance(pilot.app.screen, ProfilePickerScreen)
     await pilot.press("up")
     await pilot.pause()
     await pilot.press("enter")
@@ -766,13 +767,14 @@ def test_home_y_cierre_total_en_la_barra_superior(
 
                 texto = app.export_text()
                 assert "✕" in texto
-                assert "●" in texto
+                assert "⌂" in texto
+                assert "Arrancar una VM" not in texto
 
                 await pilot.click("#home")
                 await _wait_state(
                     pilot,
-                    lambda: isinstance(app.screen, ProfilesScreen),
-                    "home no abrió la lista de perfiles",
+                    lambda: isinstance(app.screen, ProfilePickerScreen),
+                    "home no abrió el selector de perfiles",
                 )
                 assert len(app.sessions) == 2
                 assert all(session.running for session in sessions)
@@ -1165,6 +1167,61 @@ def test_la_sesion_respeta_el_wipe_del_perfil(
                 await _wait_finished(pilot, app, runtime_id)
                 assert app.sessions[runtime_id].wipe is True
                 assert "Wipe: 8 MiB" in app.last_report
+                await _close_active_and_wait(pilot, app)
+                await _quit_profiles(pilot, app)
+
+        asyncio.run(run())
+    finally:
+        _kill_marked_children(marker)
+
+def test_el_selector_arranca_otra_vm_sin_cerrar_las_vivas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_ok
+):
+    marker = tmp_path / "qemu.pid"
+    qemu = _looping_qemu(tmp_path, marker)
+    app = VvmApp(
+        profiles_path=_two_profiles_file(tmp_path),
+        qemu=str(qemu),
+        refresh_interval=0.2,
+    )
+    try:
+
+        async def run() -> None:
+            async with _running_app(app, (110, 40)) as pilot:
+                await pilot.pause()
+                await _start_first(pilot)
+                await _wait_sessions(pilot, app, 1)
+                primera = next(iter(app.sessions.values())).session
+
+                await pilot.click("#home")
+                await _wait_state(
+                    pilot,
+                    lambda: isinstance(app.screen, ProfilePickerScreen),
+                    "home no abrió el selector",
+                )
+                tabla = app.screen.query_one(DataTable)
+                assert tabla.row_count == 2
+
+                # el cursor está en el perfil por defecto: se baja al otro
+                await pilot.press("down")
+                await pilot.press("enter")
+                await _wait_state(
+                    pilot,
+                    lambda: isinstance(app.screen, PreCheckScreen),
+                    "enter en el selector no llevó al pre-chequeo",
+                )
+                assert primera.running
+                assert len(app.sessions) == 1
+
+                await pilot.press("escape")
+                await _wait_state(
+                    pilot,
+                    lambda: isinstance(app.screen, MainScreen),
+                    "escape en el pre-chequeo no volvió al centro de control",
+                )
+                assert primera.running
+                assert "⌂" in app.export_text()
+
                 await _close_active_and_wait(pilot, app)
                 await _quit_profiles(pilot, app)
 

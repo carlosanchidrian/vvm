@@ -137,17 +137,37 @@ Footer {
     content-align: left middle;
 }
 
+#topbar Button {
+    width: 3;
+    min-width: 3;
+    height: 1;
+    min-height: 1;
+    border: none;
+    padding: 0;
+    margin: 0 1 0 0;
+    background: $primary;
+    color: $text;
+    content-align: center middle;
+    text-style: bold;
+}
+
 #home {
     dock: left;
-    height: 1;
-    min-width: 3;
     color: #3b82f6;
 }
 
 #close-all {
     dock: right;
-    height: 1;
-    min-width: 3;
+    color: $error;
+}
+
+#topbar Button:hover {
+    background: $primary-lighten-2;
+}
+
+#topbar Button:focus {
+    background: $primary-lighten-3;
+    color: $text;
 }
 
 #empty-state {
@@ -238,4 +258,39 @@ ConsoleView.capturing {
 #close-all-buttons {
     height: auto;
     margin-top: 1;
+}
+
+ProfilePickerScreen {
+    align: center middle;
+    background: $background 35%;
+}
+
+#picker-box {
+    width: 72;
+    height: auto;
+    max-height: 20;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#picker-title {
+    height: 1;
+    text-style: bold;
+}
+
+#picker-sub {
+    height: 1;
+    color: $text-muted;
+}
+
+#picker-table {
+    height: 10;
+    margin-top: 1;
+}
+
+#picker-hint {
+    height: 1;
+    margin-top: 1;
+    color: $text-muted;
 }
