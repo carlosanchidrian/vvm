@@ -728,10 +728,10 @@ class MainScreen(Screen):
         strip = self.query_one("#tabstrip", Horizontal)
         item = Horizontal(
             Button(
-                f"{tab.symbol} {runtime.label}",
+                runtime.label,
                 id=f"tabbtn-{runtime.id}",
                 classes="tabbtn",
-                tooltip=f"Ir a {runtime.label}",
+                tooltip=f"{runtime.label} · {runtime.state}",
             ),
             Button(
                 "✕",
@@ -822,13 +822,13 @@ class MainScreen(Screen):
             content_tab = self.query_one(TabbedContent).get_tab(
                 self._pane_id(runtime_id)
             )
-            content_tab.label = f"{tab.symbol} {tab.runtime.label}"
+            content_tab.label = tab.runtime.label
         except (ValueError, NoMatches):
             pass
         try:
-            self.query_one(f"#tabbtn-{runtime_id}", Button).label = (
-                f"{tab.symbol} {tab.runtime.label}"
-            )
+            button = self.query_one(f"#tabbtn-{runtime_id}", Button)
+            button.label = tab.runtime.label
+            button.tooltip = f"{tab.runtime.label} · {tab.runtime.state}"
         except NoMatches:
             pass
         self._mark_active_tab()
